@@ -18,6 +18,7 @@ Ozellikler:
 import sys
 import logging
 from PyQt6.QtWidgets import QApplication, QGroupBox
+from PyQt6.QtCore import QCoreApplication
 from kullanici_arayuzu import AnaPencere
 from veritabani import SQLiteRepository, BackupManager
 from zamanlayici import Zamanlayici

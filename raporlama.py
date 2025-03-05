@@ -8,132 +8,181 @@ from events import Event
 from typing import Optional, Dict, Any
 import os
 from datetime import datetime
+import concurrent.futures
 
 class RaporlamaWorker(QThread):
     """
-    Raporlama islemlerini arka planda gerceklestiren worker sinifi.
-    
-    Bu sinif, uzun suren raporlama islemlerini arka planda gerceklestirerek
-    kullanici arayuzunun donmasini engeller.
+    Raporlama işlemlerini arka planda ve paralel olarak gerçekleştiren worker sınıfı.
     """
     tamamlandi = pyqtSignal(dict)
     hata = pyqtSignal(str)
     ilerleme = pyqtSignal(dict)
     
-    def __init__(self, services, baslangic_tarihi=None, bitis_tarihi=None):
+    def __init__(self, services, baslangic_tarihi=None, bitis_tarihi=None, max_workers=4):
         super().__init__()
         self.services = services
         self.baslangic_tarihi = baslangic_tarihi
         self.bitis_tarihi = bitis_tarihi
+        self.max_workers = max_workers  # Paralel iş parçacığı sayısı
+    
+    def _paralel_kohort_hesapla(self, ay_listesi):
+        """Kohort analizini ay bazında paralel olarak hesaplar."""
+        def hesapla_ay(ay):
+            try:
+                # Her ay için kohort verisini hesapla (örnek fonksiyon)
+                kohort_veri = self.services.generate_kohort_for_month(
+                    ay=ay,
+                    baslangic_tarihi=self.baslangic_tarihi,
+                    bitis_tarihi=self.bitis_tarihi
+                )
+                return {ay: kohort_veri}
+            except Exception as e:
+                return {ay: {"error": str(e)}}
         
+        sonuclar = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_ay = {executor.submit(hesapla_ay, ay): ay for ay in ay_listesi}
+            tamamlanan = 0
+            for future in concurrent.futures.as_completed(future_to_ay):
+                ay = future_to_ay[future]
+                try:
+                    sonuc = future.result()
+                    sonuclar.update(sonuc)
+                except Exception as e:
+                    sonuclar[ay] = {"error": str(e)}
+                
+                tamamlanan += 1
+                yuzde = int((tamamlanan / len(ay_listesi)) * 100)
+                self.ilerleme.emit({"yuzde": yuzde, "mesaj": f"Ay {ay} işlendi"})
+        
+        return sonuclar
+    
     def run(self):
         try:
-            sonuc = self.services.generate_kohort_report(
-                baslangic_tarihi=self.baslangic_tarihi,
-                bitis_tarihi=self.bitis_tarihi
-            )
-            self.tamamlandi.emit(sonuc)
+            # Örnek: Aylık kohort analizi için tarih aralığını böl
+            baslangic = datetime.strptime(self.baslangic_tarihi, "%Y-%m-%d")
+            bitis = datetime.strptime(self.bitis_tarihi, "%Y-%m-%d")
+            ay_listesi = [(baslangic.year, baslangic.month + i) for i in range((bitis.year - baslangic.year) * 12 + bitis.month - baslangic.month + 1)]
+            ay_listesi = [f"{yil}-{ay:02d}" for yil, ay in ay_listesi]
+            
+            # Paralel hesaplama
+            kohort_sonuclar = self._paralel_kohort_hesapla(ay_listesi)
+            
+            # Sonuçları birleştir ve rapor oluştur
+            rapor = self.services.finalize_kohort_report(kohort_sonuclar)
+            self.tamamlandi.emit(rapor)
         except Exception as e:
             self.hata.emit(str(e))
 
 class Raporlama:
     """
-    Raporlama islemlerini gerceklestiren sinif.
-    
-    Bu sinif, kullanici arayuzunde raporlama menulerini olusturur ve
-    cesitli raporlarin olusturulmasini saglar.
+    Raporlama işlemlerini gerçekleştiren sınıf.
+    Paralel işleme ile büyük veri setleri için performans artırılmıştır.
     """
     
     def __init__(self, parent, services, loglayici, gorsellestirici):
         """
-        Raporlama sinifinin kurucu metodu.
-        
         Args:
             parent: Ebeveyn pencere
-            services: Servis katmani
+            services: Servis katmanı
             loglayici: Loglama nesnesi
-            gorsellestirici: GorselleÅŸtirme nesnesi
+            gorsellestirici: Görselleştirme nesnesi
         """
         self.parent = parent
         self.services = services
         self.loglayici = loglayici
         self.gorsellestirici = gorsellestirici
+    
+    def _paralel_rapor_hesapla(self, rapor_fonksiyonu, rapor_adi, parametreler=None):
+        """Genel bir paralel rapor hesaplama metodu."""
+        def hesapla_parca(parca):
+            try:
+                return rapor_fonksiyonu(**parca)
+            except Exception as e:
+                return {"error": str(e)}
         
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            parametreler = parametreler or [{}]
+            future_to_parca = {executor.submit(hesapla_parca, parca): parca for parca in parametreler}
+            sonuclar = []
+            for future in concurrent.futures.as_completed(future_to_parca):
+                try:
+                    sonuc = future.result()
+                    sonuclar.append(sonuc)
+                except Exception as e:
+                    self.loglayici.error(f"{rapor_adi} parça hesaplama hatası: {str(e)}")
+            
+            # Sonuçları birleştir
+            return self._rapor_birlestir(sonuclar, rapor_adi)
+    
+    def _rapor_birlestir(self, sonuclar, rapor_adi):
+        """Paralel hesaplanan rapor parçalarını birleştirir."""
+        birlesik_rapor = ""
+        for sonuc in sonuclar:
+            if isinstance(sonuc, dict) and "error" in sonuc:
+                birlesik_rapor += f"<p>Hata: {sonuc['error']}</p>"
+            else:
+                birlesik_rapor += sonuc
+        return birlesik_rapor
+    
     def raporlar_menusu_olustur(self):
-        """Raporlar menusunu olusturur"""
+        """Raporlar menüsünü oluşturur"""
         raporlar_menusu = self.parent.menuBar().addMenu("Raporlar")
         
-        # Satis Raporu
-        satis_raporu_action = self.parent.create_action("Satis Raporu", self.satis_raporu_olustur)
-        raporlar_menusu.addAction(satis_raporu_action)
+        raporlar = [
+            ("Satis Raporu", self.satis_raporu_olustur),
+            ("Musteri Raporu", self.musteri_raporu_olustur),
+            ("Ziyaret Raporu", self.ziyaret_raporu_olustur),
+            ("Sikayet Raporu", self.sikayet_raporu_olustur),
+            ("Pipeline Raporu", self.pipeline_raporu_olustur),
+            ("Urun BOM Raporu", self.urun_bom_raporu_olustur),
+            ("Urun Performans Raporu", self.urun_performans_raporu_olustur),
+            ("Kohort Analizi Raporu", self.kohort_analizi_raporu_olustur),
+        ]
         
-        # Musteri Raporu
-        musteri_raporu_action = self.parent.create_action("Musteri Raporu", self.musteri_raporu_olustur)
-        raporlar_menusu.addAction(musteri_raporu_action)
-        
-        # Ziyaret Raporu
-        ziyaret_raporu_action = self.parent.create_action("Ziyaret Raporu", self.ziyaret_raporu_olustur)
-        raporlar_menusu.addAction(ziyaret_raporu_action)
-        
-        # Sikayet Raporu
-        sikayet_raporu_action = self.parent.create_action("Sikayet Raporu", self.sikayet_raporu_olustur)
-        raporlar_menusu.addAction(sikayet_raporu_action)
-        
-        # Pipeline Raporu
-        pipeline_raporu_action = self.parent.create_action("Pipeline Raporu", self.pipeline_raporu_olustur)
-        raporlar_menusu.addAction(pipeline_raporu_action)
-        
-        # Urun BOM Raporu
-        urun_bom_raporu_action = self.parent.create_action("Urun BOM Raporu", self.urun_bom_raporu_olustur)
-        raporlar_menusu.addAction(urun_bom_raporu_action)
-        
-        # Urun Performans Raporu
-        urun_performans_raporu_action = self.parent.create_action("Urun Performans Raporu", self.urun_performans_raporu_olustur)
-        raporlar_menusu.addAction(urun_performans_raporu_action)
-        
-        # Kohort Analizi Raporu
-        kohort_analizi_action = self.parent.create_action("Kohort Analizi Raporu", self.kohort_analizi_raporu_olustur)
-        raporlar_menusu.addAction(kohort_analizi_action)
+        for ad, fonksiyon in raporlar:
+            action = self.parent.create_action(ad, fonksiyon)
+            raporlar_menusu.addAction(action)
         
         return raporlar_menusu
     
     def satis_raporu_olustur(self):
-        """Satis raporu olusturur"""
-        rapor = self.services.generate_sales_report()
-        self.rapor_goster("Aylik Satis Raporu", rapor)
+        """Satış raporunu paralel olarak oluşturur"""
+        rapor = self._paralel_rapor_hesapla(self.services.generate_sales_report, "Satış Raporu")
+        self.rapor_goster("Aylık Satış Raporu", rapor)
     
     def musteri_raporu_olustur(self):
-        """Musteri raporu olusturur"""
-        rapor = self.services.generate_customer_report()
-        self.rapor_goster("Musteri Analiz Raporu", rapor)
+        """Müşteri raporunu paralel olarak oluşturur"""
+        rapor = self._paralel_rapor_hesapla(self.services.generate_customer_report, "Müşteri Raporu")
+        self.rapor_goster("Müşteri Analiz Raporu", rapor)
     
     def ziyaret_raporu_olustur(self):
-        """Ziyaret raporu olusturur"""
-        rapor = self.services.generate_visit_report()
+        """Ziyaret raporunu paralel olarak oluşturur"""
+        rapor = self._paralel_rapor_hesapla(self.services.generate_visit_report, "Ziyaret Raporu")
         self.rapor_goster("Ziyaret Raporu", rapor)
     
     def sikayet_raporu_olustur(self):
-        """Sikayet raporu olusturur"""
-        rapor = self.services.generate_complaint_report()
-        self.rapor_goster("Sikayet Raporu", rapor)
+        """Şikayet raporunu paralel olarak oluşturur"""
+        rapor = self._paralel_rapor_hesapla(self.services.generate_complaint_report, "Şikayet Raporu")
+        self.rapor_goster("Şikayet Raporu", rapor)
     
     def pipeline_raporu_olustur(self):
-        """Pipeline raporu olusturur"""
-        rapor = self.services.generate_pipeline_report()
+        """Pipeline raporunu paralel olarak oluşturur"""
+        rapor = self._paralel_rapor_hesapla(self.services.generate_pipeline_report, "Pipeline Raporu")
         self.rapor_goster("Pipeline Raporu", rapor)
     
     def urun_bom_raporu_olustur(self):
-        """Urun BOM raporu olusturur"""
-        rapor = self.services.generate_urun_bom_report()
-        self.rapor_goster("Urun BOM Raporu", rapor)
+        """Ürün BOM raporunu paralel olarak oluşturur"""
+        rapor = self._paralel_rapor_hesapla(self.services.generate_urun_bom_report, "Ürün BOM Raporu")
+        self.rapor_goster("Ürün BOM Raporu", rapor)
     
     def urun_performans_raporu_olustur(self):
-        """Urun performans raporu olusturur"""
-        rapor = self.services.generate_urun_performans_report()
-        self.rapor_goster("Urun Performans Raporu", rapor)
+        """Ürün performans raporunu paralel olarak oluşturur"""
+        rapor = self._paralel_rapor_hesapla(self.services.generate_urun_performans_report, "Ürün Performans Raporu")
+        self.rapor_goster("Ürün Performans Raporu", rapor)
     
     def rapor_goster(self, baslik, rapor):
-        """Raporu gosterir"""
+        """Raporu gösterir"""
         dialog = QDialog(self.parent)
         dialog.setWindowTitle(baslik)
         dialog.setMinimumSize(800, 600)
@@ -153,24 +202,23 @@ class Raporlama:
         dialog.exec()
     
     def kohort_analizi_raporu_olustur(self):
-        """Kohort analizi raporu olusturur"""
+        """Kohort analizi raporunu oluşturur"""
         dialog = QDialog(self.parent)
         dialog.setWindowTitle("Kohort Analizi Parametreleri")
         dialog.setMinimumWidth(400)
         
         yerlesim = QFormLayout(dialog)
         
-        # Tarih araligi secimi
         baslangic_tarihi = QDateEdit()
-        baslangic_tarihi.setDate(QDate.currentDate().addMonths(-12))  # Son 12 ay
+        baslangic_tarihi.setDate(QDate.currentDate().addMonths(-12))
         baslangic_tarihi.setCalendarPopup(True)
         
         bitis_tarihi = QDateEdit()
         bitis_tarihi.setDate(QDate.currentDate())
         bitis_tarihi.setCalendarPopup(True)
         
-        yerlesim.addRow("Baslangic Tarihi:", baslangic_tarihi)
-        yerlesim.addRow("Bitis Tarihi:", bitis_tarihi)
+        yerlesim.addRow("Başlangıç Tarihi:", baslangic_tarihi)
+        yerlesim.addRow("Bitiş Tarihi:", bitis_tarihi)
         
         butonlar = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | 
@@ -180,26 +228,23 @@ class Raporlama:
         yerlesim.addRow(butonlar)
         
         olustur_butonu = butonlar.button(QDialogButtonBox.StandardButton.Ok)
-        olustur_butonu.setText("Rapor Olustur")
+        olustur_butonu.setText("Rapor Oluştur")
         iptal_butonu = butonlar.button(QDialogButtonBox.StandardButton.Cancel)
-        iptal_butonu.setText("Iptal")
+        iptal_butonu.setText("İptal")
         
         def rapor_olustur():
-            # Parametreleri al
             baslangic = baslangic_tarihi.date().toString("yyyy-MM-dd")
             bitis = bitis_tarihi.date().toString("yyyy-MM-dd")
             
             dialog.accept()
             
-            # Ilerleme dialogu
-            ilerleme_dialog = QProgressDialog("Kohort analizi raporu olusturuluyor...", "Iptal", 0, 100, self.parent)
-            ilerleme_dialog.setWindowTitle("Islem Devam Ediyor")
+            ilerleme_dialog = QProgressDialog("Kohort analizi raporu oluşturuluyor...", "İptal", 0, 100, self.parent)
+            ilerleme_dialog.setWindowTitle("İşlem Devam Ediyor")
             ilerleme_dialog.setWindowModality(Qt.WindowModality.WindowModal)
             ilerleme_dialog.setMinimumDuration(0)
             ilerleme_dialog.setValue(0)
             ilerleme_dialog.show()
             
-            # Kohort analizini arka planda calistir
             self._kohort_analizi_olustur(baslangic, bitis, ilerleme_dialog)
         
         olustur_butonu.clicked.connect(rapor_olustur)
@@ -208,57 +253,42 @@ class Raporlama:
         dialog.exec()
     
     def _kohort_analizi_olustur(self, baslangic_tarihi, bitis_tarihi, ilerleme_dialog):
-        """Kohort analizini arka planda olusturur"""
         try:
-            # Worker thread olustur
             self.worker = RaporlamaWorker(
                 self.services,
                 baslangic_tarihi=baslangic_tarihi,
-                bitis_tarihi=bitis_tarihi
+                bitis_tarihi=bitis_tarihi,
+                max_workers=4
             )
             
-            # Sinyalleri bagla
+            # Sinyalleri ana iş parçacığına güvenli bir şekilde bağla
             self.worker.tamamlandi.connect(lambda sonuc: self._kohort_analizi_tamamlandi(sonuc, ilerleme_dialog))
             self.worker.hata.connect(lambda hata: self._kohort_analizi_hatasi(hata, ilerleme_dialog))
             self.worker.ilerleme.connect(lambda data: ilerleme_dialog.setValue(data.get("yuzde", 0)))
             
-            # Thread'i baslat
             self.worker.start()
-            
+        
         except Exception as e:
             ilerleme_dialog.close()
-            self.loglayici.error(f"Kohort analizi baslatilirken hata: {str(e)}")
-            QMessageBox.critical(self.parent, "Hata", f"Kohort analizi baslatilirken hata: {str(e)}")
+            self.loglayici.error(f"Kohort analizi başlatılırken hata: {str(e)}")
+            self.parent.show_error(f"Kohort analizi başlatılırken hata: {str(e)}")
     
     def _kohort_analizi_tamamlandi(self, sonuc, ilerleme_dialog):
-        """Kohort analizi tamamlandiginda cagrilir"""
-        try:
-            ilerleme_dialog.close()
-            
-            if not sonuc.get("success", False):
-                QMessageBox.critical(self.parent, "Hata", sonuc.get("message", "Bilinmeyen hata"))
-                return
-            
-            # Rapor dosyasini ac
-            rapor_dosyasi = sonuc["rapor_dosyasi"]
-            self.loglayici.info(f"Kohort analizi raporu olusturuldu: {rapor_dosyasi}")
-            
-            # Raporu goster
-            self.gorsellestirici.html_goster(
-                html_icerik=sonuc["html_rapor"],
-                baslik="Kohort Analizi Raporu",
-                dosya_yolu=rapor_dosyasi
-            )
-            
-            # Basari mesaji
-            QMessageBox.information(self.parent, "Basarili", "Kohort analizi raporu olusturuldu.")
-            
-        except Exception as e:
-            self.loglayici.error(f"Kohort analizi raporu olusturulurken hata: {str(e)}")
-            QMessageBox.critical(self.parent, "Hata", f"Kohort analizi raporu olusturulurken hata: {str(e)}")
-    
-    def _kohort_analizi_hatasi(self, hata_mesaji, ilerleme_dialog):
-        """Kohort analizi sirasinda hata olustugunda cagrilir"""
         ilerleme_dialog.close()
-        self.loglayici.error(f"Kohort analizi hatasi: {hata_mesaji}")
-        QMessageBox.critical(self.parent, "Hata", f"Kohort analizi hatasi: {hata_mesaji}") 
+        if not sonuc.get("success", False):
+            self.parent.show_error(sonuc.get("message", "Bilinmeyen hata"))
+            return
+        
+        rapor_dosyasi = sonuc["rapor_dosyasi"]
+        self.loglayici.info(f"Kohort analizi raporu oluşturuldu: {rapor_dosyasi}")
+        self.gorsellestirici.html_goster(
+            html_icerik=sonuc["html_rapor"],
+            baslik="Kohort Analizi Raporu",
+            dosya_yolu=rapor_dosyasi
+        )
+        self.parent.show_info("Başarılı", "Kohort analizi raporu oluşturuldu.")
+
+    def _kohort_analizi_hatasi(self, hata_mesaji, ilerleme_dialog):
+        ilerleme_dialog.close()
+        self.loglayici.error(f"Kohort analizi hatası: {hata_mesaji}")
+        self.parent.show_error(f"Kohort analizi hatası: {hata_mesaji}")

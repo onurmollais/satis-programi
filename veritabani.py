@@ -14,6 +14,7 @@ import json
 import threading
 from sifreleme import SifrelemeYoneticisi  # Yeni import
 
+
 HATA_KODLARI = {
     "VERI_KAYDET_001": "Veri cercevesi bos veya None",
     "VERI_KAYDET_002": "Gecersiz tablo adi",
@@ -112,7 +113,129 @@ class BackupManager:
                 }))
             return False, error_msg
 
+
 class SQLiteRepository(RepositoryInterface):
+    def __init__(self, db_path: str = "crm_database.db", event_manager=None, max_connections: int = 5, min_connections: int = 2):
+        self.db_path = db_path
+        self.event_manager = event_manager
+        self.max_connections = max_connections
+        self.min_connections = min_connections  # Minimum bağlantı sayısı eklendi
+        self._lock = threading.Lock()
+        self.loglayici = logging.getLogger(__name__)
+        
+        # Thread-local veri yapısı
+        self._thread_local = threading.local()
+        self._initialize_pool_for_thread()  # İlk başlatma
+        
+    def _create_connection(self) -> sqlite3.Connection:
+        """Yeni bir SQLite bağlantısı oluşturur ve optimize eder."""
+        conn = sqlite3.connect(self.db_path, timeout=10)  # Zaman aşımı eklendi
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-2000")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA mmap_size=2147483648")
+        return conn
+
+    def _initialize_pool_for_thread(self) -> None:
+        """Thread için bağlantı havuzunu başlatır."""
+        if not hasattr(self._thread_local, 'connection_pool'):
+            self._thread_local.connection_pool = []
+            self._thread_local.available_connections = []
+            self._thread_local.active_connections = 0  # Aktif bağlantı sayısını takip et
+            
+        # Minimum bağlantı sayısına ulaşana kadar doldur
+        while len(self._thread_local.connection_pool) < self.min_connections:
+            conn = self._create_connection()
+            self._thread_local.connection_pool.append(conn)
+            self._thread_local.available_connections.append(conn)
+        self.loglayici.debug(f"Thread {threading.get_ident()} için bağlantı havuzu başlatıldı.")
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Havuzdan bağlantı alır veya gerekirse yeni bir tane oluşturur."""
+        self._initialize_pool_for_thread()
+        
+        with self._lock:
+            # Müsait bağlantı varsa kullan
+            if self._thread_local.available_connections:
+                conn = self._thread_local.available_connections.pop()
+                if self._is_connection_healthy(conn):
+                    self._thread_local.active_connections += 1
+                    return conn
+                else:
+                    self._thread_local.connection_pool.remove(conn)
+                    conn.close()
+
+            # Havuzda yer varsa yeni bağlantı oluştur
+            if len(self._thread_local.connection_pool) < self.max_connections:
+                conn = self._create_connection()
+                self._thread_local.connection_pool.append(conn)
+                self._thread_local.active_connections += 1
+                return conn
+
+            # Havuz doluysa hata fırlat
+            raise RepositoryError(
+                "Maksimum bağlantı sayısına ulaşıldı",
+                ErrorCode.DB_CONNECTION_ERROR.value,
+                {"max_connections": self.max_connections}
+            )
+
+    def _release_connection(self, conn: sqlite3.Connection) -> None:
+        """Bağlantıyı havuza geri döndürür."""
+        with self._lock:
+            if conn in self._thread_local.connection_pool:
+                if self._is_connection_healthy(conn):
+                    self._thread_local.available_connections.append(conn)
+                else:
+                    self._thread_local.connection_pool.remove(conn)
+                    conn.close()
+                    self._replace_dead_connection()
+                self._thread_local.active_connections -= 1
+
+            # Havuzda fazla bağlantı varsa küçült
+            self._shrink_pool_if_needed()
+
+    def _is_connection_healthy(self, conn: sqlite3.Connection) -> bool:
+        """Bağlantının sağlıklı olup olmadığını kontrol eder."""
+        try:
+            conn.execute("SELECT 1")
+            return True
+        except sqlite3.Error as e:
+            self.loglayici.warning(f"Bağlantı sağlıksız: {str(e)}")
+            return False
+
+    def _replace_dead_connection(self) -> None:
+        """Bozuk bağlantıyı yenisiyle değiştirir."""
+        if len(self._thread_local.connection_pool) < self.max_connections:
+            new_conn = self._create_connection()
+            self._thread_local.connection_pool.append(new_conn)
+            self._thread_local.available_connections.append(new_conn)
+            self.loglayici.info("Bozuk bağlantı yenisiyle değiştirildi.")
+
+    def _shrink_pool_if_needed(self) -> None:
+        """Havuzda fazla bağlantı varsa küçültür."""
+        if (len(self._thread_local.connection_pool) > self.min_connections and 
+            len(self._thread_local.available_connections) > self.min_connections):
+            excess = len(self._thread_local.available_connections) - self.min_connections
+            for _ in range(excess):
+                conn = self._thread_local.available_connections.pop()
+                self._thread_local.connection_pool.remove(conn)
+                conn.close()
+            self.loglayici.debug(f"Havuz küçültüldü, mevcut bağlantı: {len(self._thread_local.connection_pool)}")
+
+    def close(self) -> None:
+        """Tüm bağlantıları kapatır."""
+        with self._lock:
+            if hasattr(self._thread_local, 'connection_pool'):
+                for conn in self._thread_local.connection_pool:
+                    conn.close()
+                self._thread_local.connection_pool.clear()
+                self._thread_local.available_connections.clear()
+                self._thread_local.active_connections = 0
+                self.loglayici.debug(f"Thread {threading.get_ident()} için bağlantı havuzu kapatıldı.")
+
+    # Diğer metodlar (save, load, vb.) aynı kalabilir, sadece _get_connection ve _release_connection kullanılır.
     def __init__(self, db_path: str = "crm_database.db", event_manager=None, max_connections: int = 5):  # Baglanti havuzu icin max_connections eklendi
         self.db_path = db_path
         self.event_manager = event_manager

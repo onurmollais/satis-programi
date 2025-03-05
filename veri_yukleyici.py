@@ -277,3 +277,209 @@ class VeriYukleyici:
             if self.event_manager:
                 self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"message": hata_mesaji}))
             raise 
+
+    def parcali_veri_yukle(self, dosya_yolu, tablo_adi, parca_boyutu=1000, islem_fonksiyonu=None):
+        """
+        Excel dosyasindan belirli bir tabloyu parcalar halinde yukler ve isler.
+        
+        Bu fonksiyon, buyuk veri setlerini belirtilen boyutta parcalara ayirarak
+        her parcayi ayri ayri yukler ve isler. Bu sayede bellek kullanimi optimize edilir
+        ve buyuk veri setleri daha verimli sekilde islenir.
+        
+        Args:
+            dosya_yolu: Excel dosyasinin yolu
+            tablo_adi: Yuklenecek tablonun adi
+            parca_boyutu: Her parcada yuklenecek satir sayisi
+            islem_fonksiyonu: Her parca icin uygulanacak islem fonksiyonu
+            
+        Returns:
+            Islenmis veri cercevesi
+        """
+        try:
+            # Excel dosyasini ac
+            excel = pd.ExcelFile(dosya_yolu)
+            
+            # Tablonun toplam satir sayisini bul
+            toplam_satir = pd.read_excel(excel, tablo_adi, nrows=0).shape[0]
+            parca_sayisi = (toplam_satir + parca_boyutu - 1) // parca_boyutu  # Yukarı yuvarlama
+            
+            self.loglayici.info(f"Parcali veri yukleme basladi: {tablo_adi}, Toplam {toplam_satir} satir, {parca_sayisi} parca")
+            
+            # Ilerleme bilgisi
+            if self.event_manager:
+                self.event_manager.emit(Event(EVENT_LOADING_PROGRESS, {
+                    "progress": 0,
+                    "current_table": tablo_adi,
+                    "total_chunks": parca_sayisi,
+                    "loaded_chunks": 0
+                }))
+            
+            # Sonuc DataFrame'i olustur
+            sonuc_df_list = []
+            
+            # Parcalar halinde yukle
+            for i in range(parca_sayisi):
+                baslangic_satir = i * parca_boyutu
+                
+                try:
+                    # Parcayi yukle
+                    parca_df = pd.read_excel(excel, tablo_adi, skiprows=baslangic_satir, nrows=parca_boyutu)
+                    
+                    # Islem fonksiyonu varsa uygula
+                    if islem_fonksiyonu:
+                        try:
+                            islenmis_parca = islem_fonksiyonu(parca_df)
+                            sonuc_df_list.append(islenmis_parca)
+                        except Exception as e:
+                            self.loglayici.error(f"Parca isleme hatasi: {str(e)}")
+                            sonuc_df_list.append(parca_df)  # Hata durumunda orijinal parcayi ekle
+                    else:
+                        sonuc_df_list.append(parca_df)
+                    
+                    # Ilerleme bilgisi
+                    if self.event_manager:
+                        ilerleme = ((i + 1) / parca_sayisi) * 100
+                        self.event_manager.emit(Event(EVENT_LOADING_PROGRESS, {
+                            "progress": ilerleme,
+                            "current_table": tablo_adi,
+                            "total_chunks": parca_sayisi,
+                            "loaded_chunks": i + 1
+                        }))
+                    
+                    self.loglayici.debug(f"Parca {i+1}/{parca_sayisi} yuklendi ve islendi.")
+                    
+                except Exception as e:
+                    self.loglayici.error(f"Parca {i+1} yukleme hatasi: {str(e)}")
+                    if self.event_manager:
+                        self.event_manager.emit(Event(EVENT_LOADING_ERROR, {
+                            "message": f"Parca {i+1} yukleme hatasi: {str(e)}",
+                            "table": tablo_adi
+                        }))
+            
+            # Tum parcalari birlestir
+            if sonuc_df_list:
+                sonuc_df = pd.concat(sonuc_df_list, ignore_index=True)
+                self.loglayici.info(f"Parcali veri yukleme tamamlandi: {tablo_adi}, {len(sonuc_df)} satir yuklendi.")
+                
+                # Veri yoneticisine kaydet
+                self._veri_yoneticisine_kaydet(tablo_adi, sonuc_df)
+                
+                # Yukleme tamamlandi bilgisi
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_LOADING_COMPLETED, {
+                        "message": f"{tablo_adi} tablosu yuklendi",
+                        "table": tablo_adi
+                    }))
+                    self.event_manager.emit(Event(EVENT_DATA_UPDATED, {
+                        "source": "parcali_veri_yukle",
+                        "table": tablo_adi
+                    }))
+                
+                return sonuc_df
+            else:
+                self.loglayici.warning(f"Parcali veri yukleme basarisiz: {tablo_adi}, hicbir parca yuklenemedi.")
+                return None
+                
+        except Exception as e:
+            hata_mesaji = f"Parcali veri yukleme hatasi: {str(e)}"
+            self.loglayici.error(hata_mesaji)
+            if self.event_manager:
+                self.event_manager.emit(Event(EVENT_LOADING_ERROR, {
+                    "message": hata_mesaji,
+                    "table": tablo_adi
+                }))
+            return None
+    
+    def _veri_yoneticisine_kaydet(self, tablo_adi, df):
+        """
+        Yuklenen veriyi veri yoneticisine kaydeder.
+        
+        Args:
+            tablo_adi: Tablo adi
+            df: Veri cercevesi
+        """
+        # Tablo adina gore veri yoneticisindeki ilgili DataFrame'e kaydet
+        if tablo_adi == 'Satiscilar':
+            self.veri_yoneticisi.satiscilar_df = df
+            self.repository.save(df, "sales_reps")
+        elif tablo_adi == 'Aylik Hedefler':
+            self.veri_yoneticisi.hedefler_df = df
+            self.veri_yoneticisi.aylik_hedefler_df = df.copy()
+            self.repository.save(df, "monthly_targets")
+            
+            # Ay sutununu kontrol et ve duzelt
+            if 'Ay' in df.columns:
+                self._ay_formatini_duzenle(df, "hedefler_df")
+                
+        elif tablo_adi == 'Pipeline':
+            self.veri_yoneticisi.pipeline_df = df
+            self.repository.save(df, "pipeline")
+        elif tablo_adi == 'Musteriler':
+            self.veri_yoneticisi.musteriler_df = df
+            self.repository.save(df, "customers")
+        elif tablo_adi == 'Ziyaretler':
+            self.veri_yoneticisi.ziyaretler_df = df
+            self.repository.save(df, "visits")
+        elif tablo_adi == 'Sikayetler':
+            self.veri_yoneticisi.sikayetler_df = df
+            self.repository.save(df, "complaints")
+        elif tablo_adi == 'Aylik Satislar Takibi':
+            self.veri_yoneticisi.satislar_df = df
+            
+            # Alt Musteri kolonu ekle
+            if 'Alt Musteri' not in df.columns:
+                self.veri_yoneticisi.satislar_df['Alt Musteri'] = ''
+                
+            # Ay formatini kontrol et ve duzelt
+            if 'Ay' in df.columns:
+                self._ay_formatini_duzenle(df, "satislar_df")
+                
+            self.repository.save(self.veri_yoneticisi.satislar_df, "sales")
+        elif tablo_adi == 'Hammadde Maliyetleri':
+            self.veri_yoneticisi.hammadde_df = df
+            self.repository.save(df, "hammadde")
+        elif tablo_adi == 'Urun BOM':
+            self.veri_yoneticisi.urun_bom_df = df
+            self.repository.save(df, "urun_bom")
+        else:
+            self.loglayici.warning(f"Bilinmeyen tablo adi: {tablo_adi}")
+    
+    def _ay_formatini_duzenle(self, df, df_adi):
+        """
+        Ay sutununu MM-YYYY formatina donusturur.
+        
+        Args:
+            df: Veri cercevesi
+            df_adi: Veri cercevesinin adi
+        """
+        try:
+            # Her bir ay degerini kontrol et ve duzelt
+            for i, ay in enumerate(df['Ay']):
+                try:
+                    ay_str = str(ay)
+                    if '-' in ay_str:
+                        # MM-YYYY formatini kontrol et
+                        ay_parcalari = ay_str.split('-')
+                        if len(ay_parcalari) == 2:
+                            ay_no = ay_parcalari[0].strip()
+                            yil = ay_parcalari[1].strip()
+                            # Ay numarasini 2 haneli, yili 4 haneli yap
+                            yeni_ay = f"{int(ay_no):02d}-{yil}"
+                            df.at[i, 'Ay'] = yeni_ay
+                            
+                            # Hedefler icin aylik_hedefler_df'i de guncelle
+                            if df_adi == "hedefler_df":
+                                self.veri_yoneticisi.aylik_hedefler_df.at[i, 'Ay'] = yeni_ay
+                    elif len(ay_str) == 6:  # YYYYMM formati
+                        yil = ay_str[:4]
+                        ay_no = ay_str[4:]
+                        yeni_ay = f"{int(ay_no):02d}-{yil}"
+                        df.at[i, 'Ay'] = yeni_ay
+                        
+                        # Hedefler icin aylik_hedefler_df'i de guncelle
+                        if df_adi == "hedefler_df":
+                            self.veri_yoneticisi.aylik_hedefler_df.at[i, 'Ay'] = yeni_ay
+                except Exception as e:
+                    self.loglayici.error(f"{df_adi} icin ay formati donusturme hatasi: {str(e)}")
+        except Exception as e:
+            self.loglayici.error(f"{df_adi} icin ay formati donusturme hatasi: {str(e)}") 

@@ -741,3 +741,56 @@ class VeriYoneticisi:
                 "urun_bazli_agirliklar": pd.DataFrame(),
                 "donem": f"{baslangic_tarihi} - {bitis_tarihi}" if baslangic_tarihi and bitis_tarihi else "Tum Zamanlar"
             }
+
+    def parcali_veri_isle(self, veri_df, parca_boyutu=1000, islem_fonksiyonu=None, ilerleme_callback=None):
+        """
+        Buyuk veri setlerini parcalar halinde isler.
+        
+        Args:
+            veri_df: Islenecek veri cercevesi
+            parca_boyutu: Her parcada islenecek satir sayisi
+            islem_fonksiyonu: Her parca icin uygulanacak islem fonksiyonu
+            ilerleme_callback: Ilerleme durumunu bildiren callback fonksiyonu
+            
+        Returns:
+            Islenmis veri cercevesi
+        """
+        return self.satis_yoneticisi.parcali_veri_isle(veri_df, parca_boyutu, islem_fonksiyonu, ilerleme_callback)
+    
+    def parcali_veri_iterator(self, veri_df, parca_boyutu=1000):
+        """
+        Buyuk veri setlerini parcalar halinde islemeyi saglayan iterator.
+        
+        Args:
+            veri_df: Islenecek veri cercevesi
+            parca_boyutu: Her parcada islenecek satir sayisi
+            
+        Yields:
+            Veri cercevesinin parcalari
+        """
+        return self.satis_yoneticisi.parcali_veri_iterator(veri_df, parca_boyutu)
+    
+    def toplu_satis_ekle(self, satislar_listesi, parca_boyutu=100):
+        """
+        Cok sayida satisi parcalar halinde ekler.
+        
+        Args:
+            satislar_listesi: Eklenecek satislarin listesi
+            parca_boyutu: Her parcada eklenecek satis sayisi
+        """
+        return self.satis_yoneticisi.toplu_satis_ekle(satislar_listesi, parca_boyutu)
+
+    def parcali_veri_yukle(self, dosya_yolu, tablo_adi, parca_boyutu=1000, islem_fonksiyonu=None):
+        """
+        Excel dosyasindan belirli bir tabloyu parcalar halinde yukler ve isler.
+        
+        Args:
+            dosya_yolu: Excel dosyasinin yolu
+            tablo_adi: Yuklenecek tablonun adi
+            parca_boyutu: Her parcada yuklenecek satir sayisi
+            islem_fonksiyonu: Her parca icin uygulanacak islem fonksiyonu
+            
+        Returns:
+            Islenmis veri cercevesi
+        """
+        return self.veri_yukleyici.parcali_veri_yukle(dosya_yolu, tablo_adi, parca_boyutu, islem_fonksiyonu)

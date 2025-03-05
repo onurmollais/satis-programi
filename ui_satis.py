@@ -1,5 +1,4 @@
-﻿# -*- coding: utf-8 -*-
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
+﻿from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
                              QTableWidgetItem, QHeaderView, QPushButton, 
                              QLineEdit, QFormLayout, QComboBox, QTextEdit,
                              QDialog, QMessageBox, QGroupBox, QAbstractItemView,
@@ -8,8 +7,10 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTa
 from PyQt6.QtCore import QDate, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QIcon, QAction
 import pandas as pd
+import re
 from events import Event, EventManager, EVENT_DATA_UPDATED, EVENT_UI_UPDATED, EVENT_ERROR_OCCURRED
 from veri_yukleme_worker import VeriYuklemeWorker
+from satis_worker import SatisEklemeWorker, ZiyaretEklemeWorker, SatisSilmeWorker, ZiyaretSilmeWorker
 from ui_interface import UIInterface
 
 class AnaPencere(QMainWindow, UIInterface):
@@ -1585,14 +1586,10 @@ class AnaPencere(QMainWindow, UIInterface):
             QMessageBox.critical(self, "Hata", f"Satis tablosu guncellenirken hata: {str(e)}")
 
     def satis_ekle(self):
-        if (self.services.data_manager.musteriler_df is None or  # self.veri_yoneticisi -> self.services.data_manager
-            self.services.data_manager.musteriler_df.empty or 
-            "Musteri Adi" not in self.services.data_manager.musteriler_df.columns):
+        if not hasattr(self.services.data_manager, 'musteriler_df') or self.services.data_manager.musteriler_df is None or self.services.data_manager.musteriler_df.empty:
             QMessageBox.warning(self, "Uyari", "Once en az bir musteri ekleyin.")
             return
-        if (self.services.data_manager.satiscilar_df is None or  # self.veri_yoneticisi -> self.services.data_manager
-            self.services.data_manager.satiscilar_df.empty or 
-            "Isim" not in self.services.data_manager.satiscilar_df.columns):
+        if not hasattr(self.services.data_manager, 'satiscilar_df') or self.services.data_manager.satiscilar_df is None or self.services.data_manager.satiscilar_df.empty:
             QMessageBox.warning(self, "Uyari", "Once en az bir satisci ekleyin.")
             return
 
@@ -1601,14 +1598,14 @@ class AnaPencere(QMainWindow, UIInterface):
         yerlesim = QFormLayout()
 
         ana_musteri_giris = QComboBox()
-        ana_musteriler = self.services.data_manager.musteriler_df[  # self.veri_yoneticisi -> self.services.data_manager
+        ana_musteriler = self.services.data_manager.musteriler_df[
             self.services.data_manager.musteriler_df["Musteri Turu"] == "Ana Musteri"
         ]["Musteri Adi"].astype(str).tolist()
         ana_musteri_giris.addItems(ana_musteriler)
         alt_musteri_giris = QComboBox()
         alt_musteri_giris.addItem("Yok")
-        alt_musteriler = self.services.data_manager.musteriler_df[  # self.veri_yoneticisi -> self.services.data_manager
-        self.services.data_manager.musteriler_df["Musteri Turu"] == "Alt Musteri"
+        alt_musteriler = self.services.data_manager.musteriler_df[
+            self.services.data_manager.musteriler_df["Musteri Turu"] == "Alt Musteri"
         ]["Musteri Adi"].astype(str).tolist()
         alt_musteri_giris.addItems(alt_musteriler)
         satisci_giris = QComboBox()
@@ -1620,74 +1617,11 @@ class AnaPencere(QMainWindow, UIInterface):
         yillar = [str(y) for y in range(2020, 2031)]
         yil_secim.addItems(yillar)
         yil_secim.setCurrentText(str(QDate.currentDate().year()))
-        
-        # Urun bilgileri
         urun_kodu_giris = QLineEdit()
         urun_adi_giris = QLineEdit()
-        
-        # Urun bilgi gostergeleri
-        urun_agirligi_label = QLabel("0.00 kg")
-        urun_maliyeti_label = QLabel("0.00 TL")
-        urun_m2_label = QLabel("0.00 mÂ²")
-        
-        # Mevcut urun BOM verilerinden urun kodlarini yukle
-        if hasattr(self.services.data_manager, 'urun_bom_df') and self.services.data_manager.urun_bom_df is not None and not self.services.data_manager.urun_bom_df.empty:
-            try:
-                urun_combo = QComboBox()
-                urunler = self.services.data_manager.urun_bom_df[["Urun Kodu", "Urun Adi"]].drop_duplicates()
-                if not urunler.empty:
-                    urun_combo.addItem("", "")  # Bos secim
-                    for _, urun in urunler.iterrows():
-                        urun_kodu = str(urun["Urun Kodu"]) if not pd.isna(urun["Urun Kodu"]) else ""
-                        urun_adi = str(urun["Urun Adi"]) if not pd.isna(urun["Urun Adi"]) else ""
-                        if urun_kodu:  # Bos olmayan kodlari ekle
-                            urun_combo.addItem(f"{urun_kodu} - {urun_adi}", {"kod": urun_kodu, "ad": urun_adi})
-                    
-                    # Urun secildiginde kod ve ad alanlarini doldur
-                    def urun_secildi(index):
-                        if index > 0:  # Bos secim degil
-                            data = urun_combo.itemData(index)
-                            urun_kodu_giris.setText(data["kod"])
-                            urun_adi_giris.setText(data["ad"])
-                            
-                            # Urun bilgilerini goster
-                            urun_kodu = data["kod"]
-                            urun_bilgileri = self.services.data_manager.urun_bom_df[self.services.data_manager.urun_bom_df["Urun Kodu"] == urun_kodu]
-                            
-                            if not urun_bilgileri.empty:
-                                # Urun agirligi
-                                if "Urun Agirligi" in urun_bilgileri.columns:
-                                    urun_agirligi = urun_bilgileri["Urun Agirligi"].iloc[0]
-                                    if pd.notna(urun_agirligi):
-                                        urun_agirligi_label.setText(f"{urun_agirligi:.2f} kg")
-                                
-                                # Urun maliyeti
-                                if "Urun Maliyeti" in urun_bilgileri.columns:
-                                    urun_maliyeti = urun_bilgileri["Urun Maliyeti"].iloc[0]
-                                    if pd.notna(urun_maliyeti):
-                                        urun_maliyeti_label.setText(f"{urun_maliyeti:.2f} TL")
-                                
-                                # Urun hesaplayici ile m2 hesapla
-                                self.services.urun_hesaplayici.set_data_frames(
-                                    self.services.data_manager.hammadde_df, 
-                                    self.services.data_manager.urun_bom_df
-                                )
-                                toplam_m2 = self.services.urun_hesaplayici.urun_oluklu_mukavva_m2_hesapla(urun_kodu)
-                                urun_m2_label.setText(f"{toplam_m2:.2f} mÂ²")
-                    
-                    urun_combo.currentIndexChanged.connect(urun_secildi)
-                    yerlesim.addRow("Urun Sec:", urun_combo)
-                    
-                    if self.loglayici:
-                        self.loglayici.info(f"Urun BOM verilerinden {len(urunler)} urun yuklendi")
-            except Exception as e:
-                if self.loglayici:
-                    self.loglayici.error(f"Urun BOM verilerinden urun yuklenirken hata: {str(e)}")
-        
-        miktar_giris = QLineEdit("1")  # Varsayilan miktar 1
+        miktar_giris = QLineEdit("1")
         birim_fiyat_giris = QLineEdit()
         satis_miktari_giris = QLineEdit()
-        
         para_birimi_giris = QComboBox()
         para_birimi_giris.addItems(["TL", "USD", "EUR"])
 
@@ -1698,56 +1632,19 @@ class AnaPencere(QMainWindow, UIInterface):
         yerlesim.addRow("Yil:", yil_secim)
         yerlesim.addRow("Urun Kodu:", urun_kodu_giris)
         yerlesim.addRow("Urun Adi:", urun_adi_giris)
-        
-        # Urun bilgi gostergeleri ekle
-        yerlesim.addRow("Urun Agirligi:", urun_agirligi_label)
-        yerlesim.addRow("Urun Maliyeti:", urun_maliyeti_label)
-        yerlesim.addRow("Urun Oluklu mÂ²:", urun_m2_label)
-        
         yerlesim.addRow("Miktar:", miktar_giris)
         yerlesim.addRow("Birim Fiyat:", birim_fiyat_giris)
         yerlesim.addRow("Satis Miktari:", satis_miktari_giris)
         yerlesim.addRow("Para Birimi:", para_birimi_giris)
 
-        # Miktar ve birim fiyat deÄŸiÅŸtiÄŸinde satÄ±ÅŸ miktarÄ±nÄ± otomatik hesapla
         def hesapla_satis_miktari():
             try:
                 miktar = float(miktar_giris.text().replace(',', '.')) if miktar_giris.text() else 0
                 birim_fiyat = float(birim_fiyat_giris.text().replace(',', '.')) if birim_fiyat_giris.text() else 0
-                satis_miktari = miktar * birim_fiyat
-                satis_miktari_giris.setText(str(satis_miktari))
-                
-                # Miktar degistiginde urun bilgilerini guncelle
-                urun_kodu = urun_kodu_giris.text()
-                if urun_kodu and self.services.data_manager.urun_bom_df is not None:
-                    urun_bilgileri = self.services.data_manager.urun_bom_df[self.services.data_manager.urun_bom_df["Urun Kodu"] == urun_kodu]
-                    
-                    if not urun_bilgileri.empty:
-                        # Urun agirligi
-                        if "Urun Agirligi" in urun_bilgileri.columns:
-                            urun_agirligi = urun_bilgileri["Urun Agirligi"].iloc[0]
-                            if pd.notna(urun_agirligi):
-                                toplam_agirlik = float(urun_agirligi) * miktar
-                                urun_agirligi_label.setText(f"{toplam_agirlik:.2f} kg")
-                        
-                        # Urun maliyeti
-                        if "Urun Maliyeti" in urun_bilgileri.columns:
-                            urun_maliyeti = urun_bilgileri["Urun Maliyeti"].iloc[0]
-                            if pd.notna(urun_maliyeti):
-                                toplam_maliyet = float(urun_maliyeti) * miktar
-                                urun_maliyeti_label.setText(f"{toplam_maliyet:.2f} TL")
-                        
-                        # Urun hesaplayici ile m2 hesapla
-                        self.services.urun_hesaplayici.set_data_frames(
-                            self.services.data_manager.hammadde_df, 
-                            self.services.data_manager.urun_bom_df
-                        )
-                        toplam_m2 = self.services.urun_hesaplayici.urun_oluklu_mukavva_m2_hesapla(urun_kodu)
-                        toplam_m2 *= miktar
-                        urun_m2_label.setText(f"{toplam_m2:.2f} mÂ²")
+                satis_miktari_giris.setText(str(miktar * birim_fiyat))
             except ValueError:
                 pass
-        
+
         miktar_giris.textChanged.connect(hesapla_satis_miktari)
         birim_fiyat_giris.textChanged.connect(hesapla_satis_miktari)
 
@@ -1761,26 +1658,16 @@ class AnaPencere(QMainWindow, UIInterface):
 
         def satis_kaydet():
             try:
-                ay_str = f"{ay_secim.currentText()}-{yil_secim.currentText()}"  # "03-2025" (MM-YYYY formati)
-                self.loglayici.debug(f"Satis ekleme - Gonderilen Ay degeri: '{ay_str}' (MM-YYYY formati)")
-                
-                # SatÄ±ÅŸ miktarÄ± kontrolÃ¼
+                ay_str = f"{ay_secim.currentText()}-{yil_secim.currentText()}"
                 satis_miktari = float(satis_miktari_giris.text().replace(',', '.'))
                 if satis_miktari <= 0:
                     raise ValueError("Satis miktari pozitif bir sayi olmali.")
-                
-                # Miktar ve birim fiyat kontrolÃ¼
                 miktar = float(miktar_giris.text().replace(',', '.'))
                 birim_fiyat = float(birim_fiyat_giris.text().replace(',', '.'))
-                
-                if miktar <= 0:
-                    raise ValueError("Miktar pozitif bir sayi olmali.")
-                if birim_fiyat <= 0:
-                    raise ValueError("Birim fiyat pozitif bir sayi olmali.")
-                
+                if miktar <= 0 or birim_fiyat <= 0:
+                    raise ValueError("Miktar ve birim fiyat pozitif olmali.")
                 if not ana_musteri_giris.currentText():
                     raise ValueError("Ana Musteri secimi zorunludur.")
-                
                 yeni_satis = {
                     "Ana Musteri": ana_musteri_giris.currentText(),
                     "Alt Musteri": alt_musteri_giris.currentText() if alt_musteri_giris.currentText() != "Yok" else None,
@@ -1793,34 +1680,16 @@ class AnaPencere(QMainWindow, UIInterface):
                     "Satis Miktari": satis_miktari,
                     "Para Birimi": para_birimi_giris.currentText()
                 }
-                self.services.add_sale(yeni_satis)  # CRMServices uzerinden ekleme
-                #self.repository.save(self.services.data_manager.satislar_df, "sales")
-                # Musterinin son satin alma tarihini guncelle
-                musteri_adi = yeni_satis["Ana Musteri"]
-                self.services.data_manager.musteriler_df.loc[
-                    self.services.data_manager.musteriler_df["Musteri Adi"] == musteri_adi,
-                    "Son Satin Alma Tarihi"
-                ] = ay_str
-                self.services.data_manager.repository.save(self.services.data_manager.musteriler_df, "customers")  # Musteri verisini kaydetme
-                self.satis_tablosu_guncelle()
-                self.musteri_tablosu_guncelle()
-                
-                # Gosterge panelini guncelle
-                if hasattr(self, 'gosterge_paneli_guncelle'):
-                    self.gosterge_paneli_guncelle()
-                
-                dialog.accept()
-                self.loglayici.info(f"Yeni satis eklendi: {yeni_satis['Ana Musteri']} - {yeni_satis.get('Alt Musteri', 'Yok')} - {yeni_satis['Satis Miktari']} {yeni_satis['Para Birimi']}")
+                self.satis_worker = SatisEklemeWorker(yeni_satis, self.services)
+                self.satis_worker.tamamlandi.connect(self._satis_ekle_tamamlandi)
+                self.satis_worker.hata.connect(self._islem_hata)
+                self.satis_worker.start()
             except ValueError as ve:
                 QMessageBox.warning(self, "Uyari", str(ve))
-            except Exception as e:
-                QMessageBox.critical(self, "Hata", f"Satis eklenirken hata: {str(e)}")
-                self.loglayici.error(f"Satis ekleme hatasi: {str(e)}")
 
         kaydet_butonu.clicked.connect(satis_kaydet)
         iptal_butonu.clicked.connect(dialog.reject)
         dialog.exec()
-
 
     def satis_duzenle(self):
         selected_items = self.satis_tablosu.selectedItems()
@@ -2035,23 +1904,14 @@ class AnaPencere(QMainWindow, UIInterface):
         if selected_items:
             row = selected_items[0].row()
             musteri_adi = self.satis_tablosu.item(row, 0).text()
-            ay = self.satis_tablosu.item(row, 2).text()  # Hata izinde 3 yerine 2 olmali, logda "Ay" 2. sutunda
+            ay = self.satis_tablosu.item(row, 3).text()
             onay = QMessageBox.question(self, "Onay", f"{musteri_adi} - {ay} satis kaydini silmek istediginize emin misiniz?",
                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if onay == QMessageBox.StandardButton.Yes:
-                # Duzeltme: self.veri_yoneticisi ve self.repository.save yerine services kullaniyoruz
-                self.services.data_manager.satislar_df = self.services.data_manager.satislar_df.drop(row).reset_index(drop=True)
-                self.services.data_manager.repository.save(self.services.data_manager.satislar_df, "sales")  # Satislari kaydetme
-                self.satis_tablosu.removeRow(row)
-                
-                # Gosterge panelini guncelle
-                if hasattr(self, 'gosterge_paneli_guncelle'):
-                    self.gosterge_paneli_guncelle()
-                
-                # Olay yayinla
-                self.data_updated_signal.emit(Event(EVENT_DATA_UPDATED, {"source": "satis_sil"}))
-                
-                self.loglayici.info(f"Satis silindi: {musteri_adi} - {ay}")
+                self.satis_worker = SatisSilmeWorker(self.services, row)  # Yeni worker
+                self.satis_worker.tamamlandi.connect(lambda: self._satis_sil_tamamlandi(row))
+                self.satis_worker.hata.connect(self._islem_hata)
+                self.satis_worker.start()
         else:
             QMessageBox.warning(self, "Uyari", "Lutfen silmek icin bir satis secin.")
 
@@ -2192,16 +2052,11 @@ class AnaPencere(QMainWindow, UIInterface):
             # QMessageBox.critical(self, "Hata", f"Ziyaret tablosu guncellenirken hata: {str(e)}")
 
     def ziyaret_ekle(self):
-        if (self.services.data_manager.musteriler_df is None or  # self.veri_yoneticisi -> self.services.data_manager
-            self.services.data_manager.musteriler_df.empty or 
-            "Musteri Adi" not in self.services.data_manager.musteriler_df.columns):
-            QMessageBox.warning(self, "Uyari", "Once en az bir musteri ekleyin (Musteri Profili sekmesinden).")
+        if not hasattr(self.services.data_manager, 'musteriler_df') or self.services.data_manager.musteriler_df is None or self.services.data_manager.musteriler_df.empty:
+            QMessageBox.warning(self, "Uyari", "Once en az bir musteri ekleyin.")
             return
-    
-        if (self.services.data_manager.satiscilar_df is None or  # self.veri_yoneticisi -> self.services.data_manager
-            self.services.data_manager.satiscilar_df.empty or 
-            "Isim" not in self.services.data_manager.satiscilar_df.columns):
-            QMessageBox.warning(self, "Uyari", "Once en az bir satisci ekleyin (Satisci Yonetimi sekmesinden).")
+        if not hasattr(self.services.data_manager, 'satiscilar_df') or self.services.data_manager.satiscilar_df is None or self.services.data_manager.satiscilar_df.empty:
+            QMessageBox.warning(self, "Uyari", "Once en az bir satisci ekleyin.")
             return
 
         dialog = QDialog(self)
@@ -2209,26 +2064,17 @@ class AnaPencere(QMainWindow, UIInterface):
         yerlesim = QFormLayout()
 
         musteri_giris = QComboBox()
-        musteri_giris.addItems(self.services.data_manager.musteriler_df["Musteri Adi"].astype(str).tolist())  # int -> str donusumu
+        musteri_giris.addItems(self.services.data_manager.musteriler_df["Musteri Adi"].astype(str).tolist())
         satisci_giris = QListWidget()
         satisci_giris.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
-        satisci_giris.addItems(self.services.data_manager.satiscilar_df["Isim"].astype(str).tolist())  # int -> str donusumu
-    
+        satisci_giris.addItems(self.services.data_manager.satiscilar_df["Isim"].astype(str).tolist())
         tarih_giris = QDateEdit()
         tarih_giris.setDate(QDate.currentDate())
-        
-        # Saat alani eklendi
         saat_giris = QLineEdit()
         saat_giris.setPlaceholderText("HH:MM (Orn: 14:30)")
-        
         konu_giris = QLineEdit()
-        
-        # Notlar alani eklendi
         notlar_giris = QTextEdit()
-        notlar_giris.setPlaceholderText("Ziyaret ile ilgili notlar...")
         notlar_giris.setMaximumHeight(100)
-        
-        # Durum alani eklendi
         durum_giris = QComboBox()
         durum_giris.addItems(["Planlanmis", "Tamamlandi", "Iptal Edildi", "Ertelendi"])
 
@@ -2255,33 +2101,24 @@ class AnaPencere(QMainWindow, UIInterface):
                     raise ValueError("En az bir satis muhendisi secmelisiniz.")
                 if not konu_giris.text().strip():
                     raise ValueError("Ziyaret konusu bos birakilamaz.")
-                
-                # Saat formatini kontrol et
                 saat = saat_giris.text().strip()
-                if saat:
-                    import re
-                    if not re.match(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$', saat):
-                        raise ValueError("Saat formati gecersiz. Lutfen HH:MM formatinda giriniz (Orn: 14:30)")
-            
+                if saat and not re.match(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$', saat):
+                    raise ValueError("Saat formati gecersiz. HH:MM formatinda giriniz.")
                 yeni_ziyaret = {
                     "Musteri Adi": musteri_giris.currentText(),
                     "Satis Temsilcisi": ", ".join(secili_satismuhendisleri),
                     "Tarih": tarih_giris.date().toString("yyyy-MM-dd"),
-                    "Saat": saat_giris.text().strip(),
+                    "Saat": saat,
+                    "Ziyaret Konusu": konu_giris.text().strip(),
                     "Notlar": notlar_giris.toPlainText().strip(),
-                    "Durum": durum_giris.currentText(),
-                    "Ziyaret Tarihi": tarih_giris.date().toString("yyyy-MM-dd"),  # Eski alan icin uyumluluk
-                    "Ziyaret Konusu": konu_giris.text().strip()  # Eski alan icin uyumluluk
+                    "Durum": durum_giris.currentText()
                 }
-                self.services.add_visit(yeni_ziyaret)  # CRMServices uzerinden ekleme
-                self.ziyaret_tablosu_guncelle()
-                dialog.accept()
-                self.loglayici.info(f"Yeni ziyaret eklendi: {yeni_ziyaret['Musteri Adi']} - {yeni_ziyaret['Satis Temsilcisi']}")
+                self.worker = ZiyaretEklemeWorker(self.services, yeni_ziyaret)  # Yeni worker
+                self.worker.tamamlandi.connect(lambda: self._ziyaret_ekle_tamamlandi(dialog))
+                self.worker.hata.connect(self._islem_hata)
+                self.worker.start()
             except ValueError as ve:
                 QMessageBox.warning(self, "Uyari", str(ve))
-            except Exception as e:
-                QMessageBox.critical(self, "Hata", f"Ziyaret eklenirken hata: {str(e)}")
-                self.loglayici.error(f"Ziyaret ekleme hatasi: {str(e)}")
 
         kaydet_butonu.clicked.connect(ziyaret_kaydet)
         iptal_butonu.clicked.connect(dialog.reject)
@@ -2289,25 +2126,19 @@ class AnaPencere(QMainWindow, UIInterface):
 
     def ziyaret_sil(self):
         selected_items = self.ziyaret_tablosu.selectedItems()
-        if not selected_items:
+        if selected_items:
+            row = selected_items[0].row()
+            musteri_adi = self.ziyaret_tablosu.item(row, 0).text()
+            tarih = self.ziyaret_tablosu.item(row, 2).text()
+            onay = QMessageBox.question(self, "Onay", f"{musteri_adi} - {tarih} ziyaretini silmek istediginize emin misiniz?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if onay == QMessageBox.StandardButton.Yes:
+                self.worker = ZiyaretSilmeWorker(self.services, row)  # Yeni worker
+                self.worker.tamamlandi.connect(lambda: self._ziyaret_sil_tamamlandi(row))
+                self.worker.hata.connect(self._islem_hata)
+                self.worker.start()
+        else:
             QMessageBox.warning(self, "Uyari", "Lutfen silmek icin bir ziyaret secin.")
-            return
-
-        row = selected_items[0].row()
-        musteri_adi = self.ziyaret_tablosu.item(row, 0).text()
-        tarih = self.ziyaret_tablosu.item(row, 2).text()
-        onay = QMessageBox.question(self, "Onay", f"{musteri_adi} - {tarih} ziyaretini silmek istediginize emin misiniz?",
-                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if onay == QMessageBox.StandardButton.Yes:
-            try:
-                # Duzeltme: self.veri_yoneticisi ve self.repository.save yerine services kullaniyoruz
-                self.services.data_manager.ziyaretler_df = self.services.data_manager.ziyaretler_df.drop(row).reset_index(drop=True)
-                self.services.data_manager.repository.save(self.services.data_manager.ziyaretler_df, "visits")  # Veritabanini kaydetme
-                self.ziyaret_tablosu.removeRow(row)
-                self.loglayici.info(f"Ziyaret silindi: {musteri_adi} - {tarih}")
-            except Exception as e:
-                QMessageBox.critical(self, "Hata", f"Ziyaret silinirken hata: {str(e)}")
-                self.loglayici.error(f"Ziyaret silme hatasi: {str(e)}")
 
     def ziyaret_duzenle(self):
         selected_items = self.ziyaret_tablosu.selectedItems()
@@ -2457,3 +2288,46 @@ class AnaPencere(QMainWindow, UIInterface):
         """Ziyaret tablosunu duruma gore filtreler"""
         # Mevcut arama metnini de dikkate alarak filtreleme yap
         self.ziyaret_ara()
+
+    def _islem_hata(self, hata_mesaji):
+        """Worker'dan gelen hata mesajlarini kullaniciya gosterir."""
+        QMessageBox.critical(self, "Hata", str(hata_mesaji))
+        self.loglayici.error(f"Islem sirasinda hata: {hata_mesaji}")
+        
+    def _satis_ekle_tamamlandi(self, dialog, musteri_adi, ay):
+        """Satis ekleme islemi tamamlandiginda cagrilir."""
+        dialog.accept()
+        self.satis_tablosu_guncelle()
+        QMessageBox.information(self, "Bilgi", f"{musteri_adi} icin {ay} ayina satis basariyla eklendi.")
+        self.loglayici.info(f"Satis eklendi: {musteri_adi}, {ay}")
+        # Veri guncellendi sinyali gonder
+        if hasattr(self, 'event_manager') and self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "add"}))
+
+    def _ziyaret_ekle_tamamlandi(self, dialog):
+        """Ziyaret ekleme islemi tamamlandiginda cagrilir."""
+        dialog.accept()
+        self.ziyaret_tablosu_guncelle()
+        QMessageBox.information(self, "Bilgi", "Ziyaret basariyla eklendi.")
+        self.loglayici.info("Ziyaret eklendi")
+        # Veri guncellendi sinyali gonder
+        if hasattr(self, 'event_manager') and self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "visits", "action": "add"}))
+
+    def _satis_sil_tamamlandi(self, row):
+        """Satis silme islemi tamamlandiginda cagrilir."""
+        self.satis_tablosu_guncelle()
+        QMessageBox.information(self, "Bilgi", "Satis basariyla silindi.")
+        self.loglayici.info(f"Satis silindi: Satir {row}")
+        # Veri guncellendi sinyali gonder
+        if hasattr(self, 'event_manager') and self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "delete"}))
+            
+    def _ziyaret_sil_tamamlandi(self, row):
+        """Ziyaret silme islemi tamamlandiginda cagrilir."""
+        self.ziyaret_tablosu_guncelle()
+        QMessageBox.information(self, "Bilgi", "Ziyaret basariyla silindi.")
+        self.loglayici.info(f"Ziyaret silindi: Satir {row}")
+        # Veri guncellendi sinyali gonder
+        if hasattr(self, 'event_manager') and self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "visits", "action": "delete"}))
