@@ -1,10 +1,11 @@
-﻿from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
-                             QTableWidgetItem, QHeaderView, QPushButton, 
-                             QLineEdit, QFormLayout, QComboBox, QTextEdit,
-                             QDialog, QMessageBox, QGroupBox, QAbstractItemView,
-                             QDialogButtonBox, QDateEdit, QProgressBar, QLabel,
-                             QFileDialog, QListWidget)
-from PyQt6.QtCore import QDate, pyqtSignal, QThread
+﻿from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
+    QTableWidgetItem, QHeaderView, QPushButton, QLineEdit, QFormLayout, 
+    QComboBox, QTextEdit, QDialog, QMessageBox, QGroupBox, QAbstractItemView,
+    QDialogButtonBox, QDateEdit, QProgressBar, QLabel, QFileDialog, QListWidget,
+    QProgressDialog
+)
+from PyQt6.QtCore import QDate, pyqtSignal, QThreadPool, Qt
 from PyQt6.QtGui import QColor, QIcon, QAction
 import pandas as pd
 import re
@@ -12,12 +13,15 @@ from events import Event, EventManager, EVENT_DATA_UPDATED, EVENT_UI_UPDATED, EV
 from veri_yukleme_worker import VeriYuklemeWorker
 from satis_worker import SatisEklemeWorker, ZiyaretEklemeWorker, SatisSilmeWorker, ZiyaretSilmeWorker
 from ui_interface import UIInterface
+from thread_worker import Worker  # Varsayıyorum ki bu dosya mevcut
 
 class AnaPencere(QMainWindow, UIInterface):
     data_updated_signal = pyqtSignal(Event)
-   
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(4)  # Maksimum 4 thread
         # Event aboneligi
         if hasattr(self, 'event_manager') and self.event_manager:
             self.event_manager.subscribe(EVENT_DATA_UPDATED, self.tum_sekmeleri_guncelle)
@@ -1586,17 +1590,19 @@ class AnaPencere(QMainWindow, UIInterface):
             QMessageBox.critical(self, "Hata", f"Satis tablosu guncellenirken hata: {str(e)}")
 
     def satis_ekle(self):
+        """Yeni satış ekleme işlemini thread-safe şekilde gerçekleştirir."""
         if not hasattr(self.services.data_manager, 'musteriler_df') or self.services.data_manager.musteriler_df is None or self.services.data_manager.musteriler_df.empty:
-            QMessageBox.warning(self, "Uyari", "Once en az bir musteri ekleyin.")
+            QMessageBox.warning(self, "Uyarı", "Önce en az bir müşteri ekleyin.")
             return
         if not hasattr(self.services.data_manager, 'satiscilar_df') or self.services.data_manager.satiscilar_df is None or self.services.data_manager.satiscilar_df.empty:
-            QMessageBox.warning(self, "Uyari", "Once en az bir satisci ekleyin.")
+            QMessageBox.warning(self, "Uyarı", "Önce en az bir satıcı ekleyin.")
             return
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Yeni Satis Ekle")
+        dialog.setWindowTitle("Yeni Satış Ekle")
         yerlesim = QFormLayout()
 
+        # Form bileşenleri (aynı kalıyor)
         ana_musteri_giris = QComboBox()
         ana_musteriler = self.services.data_manager.musteriler_df[
             self.services.data_manager.musteriler_df["Musteri Turu"] == "Ana Musteri"
@@ -1661,13 +1667,14 @@ class AnaPencere(QMainWindow, UIInterface):
                 ay_str = f"{ay_secim.currentText()}-{yil_secim.currentText()}"
                 satis_miktari = float(satis_miktari_giris.text().replace(',', '.'))
                 if satis_miktari <= 0:
-                    raise ValueError("Satis miktari pozitif bir sayi olmali.")
+                    raise ValueError("Satış miktarı pozitif bir sayı olmalı.")
                 miktar = float(miktar_giris.text().replace(',', '.'))
                 birim_fiyat = float(birim_fiyat_giris.text().replace(',', '.'))
                 if miktar <= 0 or birim_fiyat <= 0:
-                    raise ValueError("Miktar ve birim fiyat pozitif olmali.")
+                    raise ValueError("Miktar ve birim fiyat pozitif olmalı.")
                 if not ana_musteri_giris.currentText():
-                    raise ValueError("Ana Musteri secimi zorunludur.")
+                    raise ValueError("Ana Müşteri seçimi zorunludur.")
+                
                 yeni_satis = {
                     "Ana Musteri": ana_musteri_giris.currentText(),
                     "Alt Musteri": alt_musteri_giris.currentText() if alt_musteri_giris.currentText() != "Yok" else None,
@@ -1680,16 +1687,34 @@ class AnaPencere(QMainWindow, UIInterface):
                     "Satis Miktari": satis_miktari,
                     "Para Birimi": para_birimi_giris.currentText()
                 }
-                self.satis_worker = SatisEklemeWorker(yeni_satis, self.services)
-                self.satis_worker.tamamlandi.connect(self._satis_ekle_tamamlandi)
-                self.satis_worker.hata.connect(self._islem_hata)
-                self.satis_worker.start()
+
+                # İlerleme göstergesi
+                progress_dialog = QProgressDialog("Satış kaydediliyor...", "İptal", 0, 0, self)
+                progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+                progress_dialog.show()
+
+                # Worker oluştur
+                worker = SatisEklemeWorker(yeni_satis, self.services)
+                worker.signals.tamamlandi.connect(lambda: self._satis_ekle_tamamlandi(dialog, progress_dialog, yeni_satis["Ana Musteri"], ay_str))
+                worker.signals.hata.connect(lambda hata: self._islem_hata(hata, progress_dialog))
+                self.thread_pool.start(worker)
+
             except ValueError as ve:
-                QMessageBox.warning(self, "Uyari", str(ve))
+                QMessageBox.warning(self, "Uyarı", str(ve))
 
         kaydet_butonu.clicked.connect(satis_kaydet)
         iptal_butonu.clicked.connect(dialog.reject)
         dialog.exec()
+
+    def _satis_ekle_tamamlandi(self, dialog, progress_dialog, musteri_adi, ay):
+        """Satış ekleme tamamlandığında ana thread'de çalışır."""
+        progress_dialog.close()
+        dialog.accept()
+        self.satis_tablosu_guncelle()
+        QMessageBox.information(self, "Bilgi", f"{musteri_adi} için {ay} ayına satış başarıyla eklendi.")
+        self.loglayici.info(f"Satış eklendi: {musteri_adi}, {ay}")
+        if hasattr(self, 'event_manager') and self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "add"}))
 
     def satis_duzenle(self):
         selected_items = self.satis_tablosu.selectedItems()
@@ -1900,20 +1925,34 @@ class AnaPencere(QMainWindow, UIInterface):
             QMessageBox.warning(self, "Uyari", "Lutfen duzenlemek icin bir satis secin.")
 
     def satis_sil(self):
+        """Satış silme işlemini thread-safe şekilde gerçekleştirir."""
         selected_items = self.satis_tablosu.selectedItems()
         if selected_items:
             row = selected_items[0].row()
             musteri_adi = self.satis_tablosu.item(row, 0).text()
             ay = self.satis_tablosu.item(row, 3).text()
-            onay = QMessageBox.question(self, "Onay", f"{musteri_adi} - {ay} satis kaydini silmek istediginize emin misiniz?",
+            onay = QMessageBox.question(self, "Onay", f"{musteri_adi} - {ay} satış kaydını silmek istediğinize emin misiniz?",
                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if onay == QMessageBox.StandardButton.Yes:
-                self.satis_worker = SatisSilmeWorker(self.services, row)  # Yeni worker
-                self.satis_worker.tamamlandi.connect(lambda: self._satis_sil_tamamlandi(row))
-                self.satis_worker.hata.connect(self._islem_hata)
-                self.satis_worker.start()
+                progress_dialog = QProgressDialog("Satış siliniyor...", "İptal", 0, 0, self)
+                progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+                progress_dialog.show()
+
+                worker = SatisSilmeWorker(self.services, row)
+                worker.signals.tamamlandi.connect(lambda: self._satis_sil_tamamlandi(row, progress_dialog))
+                worker.signals.hata.connect(lambda hata: self._islem_hata(hata, progress_dialog))
+                self.thread_pool.start(worker)
         else:
-            QMessageBox.warning(self, "Uyari", "Lutfen silmek icin bir satis secin.")
+            QMessageBox.warning(self, "Uyarı", "Lütfen silmek için bir satış seçin.")
+
+    def _satis_sil_tamamlandi(self, row, progress_dialog):
+        """Satış silme tamamlandığında ana thread'de çalışır."""
+        progress_dialog.close()
+        self.satis_tablosu_guncelle()
+        QMessageBox.information(self, "Bilgi", "Satış başarıyla silindi.")
+        self.loglayici.info(f"Satış silindi: Satır {row}")
+        if hasattr(self, 'event_manager') and self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "delete"}))
 
     def ziyaret_planlama_olustur(self):
         """Ziyaret planlama sekmesini olusturur"""
@@ -2052,11 +2091,12 @@ class AnaPencere(QMainWindow, UIInterface):
             # QMessageBox.critical(self, "Hata", f"Ziyaret tablosu guncellenirken hata: {str(e)}")
 
     def ziyaret_ekle(self):
+        """Yeni ziyaret ekleme işlemini thread-safe şekilde gerçekleştirir."""
         if not hasattr(self.services.data_manager, 'musteriler_df') or self.services.data_manager.musteriler_df is None or self.services.data_manager.musteriler_df.empty:
-            QMessageBox.warning(self, "Uyari", "Once en az bir musteri ekleyin.")
+            QMessageBox.warning(self, "Uyarı", "Önce en az bir müşteri ekleyin.")
             return
         if not hasattr(self.services.data_manager, 'satiscilar_df') or self.services.data_manager.satiscilar_df is None or self.services.data_manager.satiscilar_df.empty:
-            QMessageBox.warning(self, "Uyari", "Once en az bir satisci ekleyin.")
+            QMessageBox.warning(self, "Uyarı", "Önce en az bir satıcı ekleyin.")
             return
 
         dialog = QDialog(self)
@@ -2071,15 +2111,15 @@ class AnaPencere(QMainWindow, UIInterface):
         tarih_giris = QDateEdit()
         tarih_giris.setDate(QDate.currentDate())
         saat_giris = QLineEdit()
-        saat_giris.setPlaceholderText("HH:MM (Orn: 14:30)")
+        saat_giris.setPlaceholderText("HH:MM (Örn: 14:30)")
         konu_giris = QLineEdit()
         notlar_giris = QTextEdit()
         notlar_giris.setMaximumHeight(100)
         durum_giris = QComboBox()
-        durum_giris.addItems(["Planlanmis", "Tamamlandi", "Iptal Edildi", "Ertelendi"])
+        durum_giris.addItems(["Planlanmış", "Tamamlandı", "İptal Edildi", "Ertelendi"])
 
-        yerlesim.addRow("Musteri:", musteri_giris)
-        yerlesim.addRow("Satis Muhendisleri:", satisci_giris)
+        yerlesim.addRow("Müşteri:", musteri_giris)
+        yerlesim.addRow("Satış Mühendisleri:", satisci_giris)
         yerlesim.addRow("Ziyaret Tarihi:", tarih_giris)
         yerlesim.addRow("Ziyaret Saati:", saat_giris)
         yerlesim.addRow("Ziyaret Konusu:", konu_giris)
@@ -2088,7 +2128,7 @@ class AnaPencere(QMainWindow, UIInterface):
 
         butonlar = QHBoxLayout()
         kaydet_butonu = QPushButton("Kaydet")
-        iptal_butonu = QPushButton("Iptal")
+        iptal_butonu = QPushButton("İptal")
         butonlar.addWidget(kaydet_butonu)
         butonlar.addWidget(iptal_butonu)
         yerlesim.addRow(butonlar)
@@ -2098,12 +2138,12 @@ class AnaPencere(QMainWindow, UIInterface):
             try:
                 secili_satismuhendisleri = [item.text() for item in satisci_giris.selectedItems()]
                 if not secili_satismuhendisleri:
-                    raise ValueError("En az bir satis muhendisi secmelisiniz.")
+                    raise ValueError("En az bir satış mühendisi seçmelisiniz.")
                 if not konu_giris.text().strip():
-                    raise ValueError("Ziyaret konusu bos birakilamaz.")
+                    raise ValueError("Ziyaret konusu boş bırakılamaz.")
                 saat = saat_giris.text().strip()
                 if saat and not re.match(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$', saat):
-                    raise ValueError("Saat formati gecersiz. HH:MM formatinda giriniz.")
+                    raise ValueError("Saat formatı geçersiz. HH:MM formatında giriniz.")
                 yeni_ziyaret = {
                     "Musteri Adi": musteri_giris.currentText(),
                     "Satis Temsilcisi": ", ".join(secili_satismuhendisleri),
@@ -2113,32 +2153,70 @@ class AnaPencere(QMainWindow, UIInterface):
                     "Notlar": notlar_giris.toPlainText().strip(),
                     "Durum": durum_giris.currentText()
                 }
-                self.worker = ZiyaretEklemeWorker(self.services, yeni_ziyaret)  # Yeni worker
-                self.worker.tamamlandi.connect(lambda: self._ziyaret_ekle_tamamlandi(dialog))
-                self.worker.hata.connect(self._islem_hata)
-                self.worker.start()
+
+                progress_dialog = QProgressDialog("Ziyaret kaydediliyor...", "İptal", 0, 0, self)
+                progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+                progress_dialog.show()
+
+                worker = ZiyaretEklemeWorker(self.services, yeni_ziyaret)
+                worker.signals.tamamlandi.connect(lambda: self._ziyaret_ekle_tamamlandi(dialog, progress_dialog))
+                worker.signals.hata.connect(lambda hata: self._islem_hata(hata, progress_dialog))
+                self.thread_pool.start(worker)
+
             except ValueError as ve:
-                QMessageBox.warning(self, "Uyari", str(ve))
+                QMessageBox.warning(self, "Uyarı", str(ve))
 
         kaydet_butonu.clicked.connect(ziyaret_kaydet)
         iptal_butonu.clicked.connect(dialog.reject)
         dialog.exec()
 
+    def _ziyaret_ekle_tamamlandi(self, dialog, progress_dialog):
+        """Ziyaret ekleme tamamlandığında ana thread'de çalışır."""
+        progress_dialog.close()
+        dialog.accept()
+        self.ziyaret_tablosu_guncelle()
+        QMessageBox.information(self, "Bilgi", "Ziyaret başarıyla eklendi.")
+        self.loglayici.info("Ziyaret eklendi")
+        if hasattr(self, 'event_manager') and self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "visits", "action": "add"}))
+ 
     def ziyaret_sil(self):
+        """Ziyaret silme işlemini thread-safe şekilde gerçekleştirir."""
         selected_items = self.ziyaret_tablosu.selectedItems()
         if selected_items:
             row = selected_items[0].row()
             musteri_adi = self.ziyaret_tablosu.item(row, 0).text()
             tarih = self.ziyaret_tablosu.item(row, 2).text()
-            onay = QMessageBox.question(self, "Onay", f"{musteri_adi} - {tarih} ziyaretini silmek istediginize emin misiniz?",
+            onay = QMessageBox.question(self, "Onay", f"{musteri_adi} - {tarih} ziyaretini silmek istediğinize emin misiniz?",
                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if onay == QMessageBox.StandardButton.Yes:
-                self.worker = ZiyaretSilmeWorker(self.services, row)  # Yeni worker
-                self.worker.tamamlandi.connect(lambda: self._ziyaret_sil_tamamlandi(row))
-                self.worker.hata.connect(self._islem_hata)
-                self.worker.start()
+                progress_dialog = QProgressDialog("Ziyaret siliniyor...", "İptal", 0, 0, self)
+                progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+                progress_dialog.show()
+
+                worker = ZiyaretSilmeWorker(self.services, row)
+                worker.signals.tamamlandi.connect(lambda: self._ziyaret_sil_tamamlandi(row, progress_dialog))
+                worker.signals.hata.connect(lambda hata: self._islem_hata(hata, progress_dialog))
+                self.thread_pool.start(worker)
         else:
-            QMessageBox.warning(self, "Uyari", "Lutfen silmek icin bir ziyaret secin.")
+            QMessageBox.warning(self, "Uyarı", "Lütfen silmek için bir ziyaret seçin.")
+
+    def _ziyaret_sil_tamamlandi(self, row, progress_dialog):
+        """Ziyaret silme tamamlandığında ana thread'de çalışır."""
+        progress_dialog.close()
+        self.ziyaret_tablosu_guncelle()
+        QMessageBox.information(self, "Bilgi", "Ziyaret başarıyla silindi.")
+        self.loglayici.info(f"Ziyaret silindi: Satır {row}")
+        if hasattr(self, 'event_manager') and self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "visits", "action": "delete"}))
+
+
+    def _islem_hata(self, hata_mesaji, progress_dialog=None):
+        """Worker'dan gelen hata mesajlarını ana thread'de işler."""
+        if progress_dialog:
+            progress_dialog.close()
+        QMessageBox.critical(self, "Hata", str(hata_mesaji))
+        self.loglayici.error(f"İşlem sırasında hata: {hata_mesaji}")
 
     def ziyaret_duzenle(self):
         selected_items = self.ziyaret_tablosu.selectedItems()
@@ -2289,45 +2367,4 @@ class AnaPencere(QMainWindow, UIInterface):
         # Mevcut arama metnini de dikkate alarak filtreleme yap
         self.ziyaret_ara()
 
-    def _islem_hata(self, hata_mesaji):
-        """Worker'dan gelen hata mesajlarini kullaniciya gosterir."""
-        QMessageBox.critical(self, "Hata", str(hata_mesaji))
-        self.loglayici.error(f"Islem sirasinda hata: {hata_mesaji}")
         
-    def _satis_ekle_tamamlandi(self, dialog, musteri_adi, ay):
-        """Satis ekleme islemi tamamlandiginda cagrilir."""
-        dialog.accept()
-        self.satis_tablosu_guncelle()
-        QMessageBox.information(self, "Bilgi", f"{musteri_adi} icin {ay} ayina satis basariyla eklendi.")
-        self.loglayici.info(f"Satis eklendi: {musteri_adi}, {ay}")
-        # Veri guncellendi sinyali gonder
-        if hasattr(self, 'event_manager') and self.event_manager:
-            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "add"}))
-
-    def _ziyaret_ekle_tamamlandi(self, dialog):
-        """Ziyaret ekleme islemi tamamlandiginda cagrilir."""
-        dialog.accept()
-        self.ziyaret_tablosu_guncelle()
-        QMessageBox.information(self, "Bilgi", "Ziyaret basariyla eklendi.")
-        self.loglayici.info("Ziyaret eklendi")
-        # Veri guncellendi sinyali gonder
-        if hasattr(self, 'event_manager') and self.event_manager:
-            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "visits", "action": "add"}))
-
-    def _satis_sil_tamamlandi(self, row):
-        """Satis silme islemi tamamlandiginda cagrilir."""
-        self.satis_tablosu_guncelle()
-        QMessageBox.information(self, "Bilgi", "Satis basariyla silindi.")
-        self.loglayici.info(f"Satis silindi: Satir {row}")
-        # Veri guncellendi sinyali gonder
-        if hasattr(self, 'event_manager') and self.event_manager:
-            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "delete"}))
-            
-    def _ziyaret_sil_tamamlandi(self, row):
-        """Ziyaret silme islemi tamamlandiginda cagrilir."""
-        self.ziyaret_tablosu_guncelle()
-        QMessageBox.information(self, "Bilgi", "Ziyaret basariyla silindi.")
-        self.loglayici.info(f"Ziyaret silindi: Satir {row}")
-        # Veri guncellendi sinyali gonder
-        if hasattr(self, 'event_manager') and self.event_manager:
-            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "visits", "action": "delete"}))

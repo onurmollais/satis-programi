@@ -162,45 +162,32 @@ class SatisYoneticisi:
             self.loglayici.warning("Eklenecek satış bulunamadı")
             return
         
-        try:
-            satis_df = pd.DataFrame(satislar_listesi)
-            satis_df = self._optimize_dataframe(satis_df, 'sales')
-            
-            if 'Miktar' in satis_df.columns and 'Birim Fiyat' in satis_df.columns:
-                satis_df['Toplam Tutar'] = satis_df.apply(
-                    lambda row: float(self.hesapla_toplam_tutar(row['Miktar'], row['Birim Fiyat'])), axis=1
-                )
-            
-            if self._bos_df_kontrol(self.veri_yoneticisi.satislar_df, "Satışlar DataFrame'i boş, yeni veriyle başlatılıyor"):
-                self.veri_yoneticisi.satislar_df = satis_df
-            else:
-                self.veri_yoneticisi.satislar_df = pd.concat([self.veri_yoneticisi.satislar_df, satis_df], ignore_index=True)
-            
-            if 'Alt Musteri' not in self.veri_yoneticisi.satislar_df.columns:
-                self.veri_yoneticisi.satislar_df['Alt Musteri'] = pd.Series('', dtype='category')
-            
-            # SQLite uyumluluğu için veri tiplerini kontrol et ve logla
-            for col in self.veri_yoneticisi.satislar_df.columns:
-                if self.veri_yoneticisi.satislar_df[col].dtype.name == 'category':
-                    self.veri_yoneticisi.satislar_df[col] = self.veri_yoneticisi.satislar_df[col].astype(str)
-                elif self.veri_yoneticisi.satislar_df[col].dtype.name == 'object':
-                    self.veri_yoneticisi.satislar_df[col] = self.veri_yoneticisi.satislar_df[col].apply(
-                        lambda x: str(x) if pd.notna(x) else None
-                    )
-            
-            self.loglayici.debug(f"Kaydedilecek satış verisi sütunları: {list(self.veri_yoneticisi.satislar_df.columns)}")
-            self.loglayici.debug(f"Veri tipleri: {self.veri_yoneticisi.satislar_df.dtypes.to_dict()}")
-            self.loglayici.debug(f"Örnek veri: {self.veri_yoneticisi.satislar_df.head(5).to_dict(orient='records')}")
-            
-            self.repository.save(self.veri_yoneticisi.satislar_df, "sales")
-            self.loglayici.info(f"Toplu satış ekleme tamamlandı: {len(satis_df)} satış eklendi")
-            
-            if self.event_manager:
-                self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "bulk_add"}))
+        satis_df = pd.DataFrame(satislar_listesi)
+        satis_df = self._optimize_dataframe(satis_df, 'sales')
         
-        except Exception as e:
-            self.loglayici.error(f"Toplu satış ekleme hatası: {str(e)}")
-            raise
+        if 'Miktar' in satis_df.columns and 'Birim Fiyat' in satis_df.columns:
+            satis_df['Toplam Tutar'] = satis_df.apply(
+                lambda row: float(self.hesapla_toplam_tutar(row['Miktar'], row['Birim Fiyat'])), axis=1
+            )
+        
+        if self._bos_df_kontrol(self.veri_yoneticisi.satislar_df, "Satışlar DataFrame'i boş, yeni veriyle başlatılıyor"):
+            self.veri_yoneticisi.satislar_df = satis_df
+        else:
+            self.veri_yoneticisi.satislar_df = pd.concat([self.veri_yoneticisi.satislar_df, satis_df], ignore_index=True)
+        
+        if 'Alt Musteri' not in self.veri_yoneticisi.satislar_df.columns:
+            self.veri_yoneticisi.satislar_df['Alt Musteri'] = pd.Series('', dtype='category')
+        
+        def on_save_finished(result):
+            if result["success"]:
+                self.loglayici.info(f"Toplu satış ekleme tamamlandı: {len(satis_df)} satış eklendi")
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "bulk_add"}))
+            else:
+                self.loglayici.error(f"Kaydetme başarısız: {result.get('error', 'Bilinmeyen hata')}")
+        
+        self.repository.save(self.veri_yoneticisi.satislar_df, "sales", callback=on_save_finished)
+            
 
     def satisci_ekle(self, yeni_satisci: Dict[str, Any]) -> None:
         """Yeni satıcıyı optimize şekilde ekler."""
