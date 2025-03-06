@@ -1,8 +1,9 @@
 ﻿# -*- coding: utf-8 -*-
 import pandas as pd
 from typing import Dict, Any, List, Callable, Optional, Iterator
-from events import Event, EVENT_DATA_UPDATED
+from events import Event, EVENT_DATA_UPDATED, EVENT_ERROR_OCCURRED
 from decimal import Decimal, getcontext
+from decimal import InvalidOperation, DivisionByZero
 
 # Decimal hassasiyetini ayarla (28 basamak genellikle finansal işlemler için yeterlidir)
 getcontext().prec = 28
@@ -82,10 +83,32 @@ class SatisYoneticisi:
 
     def hesapla_toplam_tutar(self, miktar: Any, birim_fiyat: Any) -> Decimal:
         """Miktar ve birim fiyat ile toplam tutarı hesaplar."""
-        miktar_decimal = Decimal(str(miktar)) if pd.notna(miktar) else Decimal('0')
-        birim_fiyat_decimal = Decimal(str(birim_fiyat)) if pd.notna(birim_fiyat) else Decimal('0')
-        toplam = miktar_decimal * birim_fiyat_decimal
-        return toplam.quantize(Decimal('0.01'))  # 2 ondalık basamağa yuvarla
+        try:
+            # Değerleri kontrol et
+            if pd.isna(miktar) or pd.isna(birim_fiyat):
+                return Decimal('0.00')
+                
+            # Decimal'e çevir
+            try:
+                miktar_decimal = Decimal(str(miktar))
+                birim_fiyat_decimal = Decimal(str(birim_fiyat))
+            except (InvalidOperation, ValueError, TypeError) as e:
+                self.loglayici.error(f"Decimal donusum hatasi: {str(e)}, miktar: {miktar}, birim_fiyat: {birim_fiyat}")
+                return Decimal('0.00')
+                
+            # Çarpma işlemi
+            try:
+                toplam = miktar_decimal * birim_fiyat_decimal
+                return toplam.quantize(Decimal('0.01'))  # 2 ondalık basamağa yuvarla
+            except (InvalidOperation, DivisionByZero, ValueError, TypeError) as e:
+                self.loglayici.error(f"Carpma islemi hatasi: {str(e)}, miktar: {miktar_decimal}, birim_fiyat: {birim_fiyat_decimal}")
+                return Decimal('0.00')
+                
+        except Exception as e:
+            self.loglayici.error(f"Toplam tutar hesaplama hatasi: {str(e)}, miktar: {miktar}, birim_fiyat: {birim_fiyat}")
+            if self.event_manager:
+                self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Toplam tutar hesaplama hatasi: {str(e)}"}))
+            return Decimal('0.00')
 
     def parcali_veri_isle(self, 
                          veri_df: pd.DataFrame, 
@@ -206,11 +229,28 @@ class SatisYoneticisi:
     def satisci_duzenle(self, index: int, guncellenmis_satisci: Dict[str, Any]) -> None:
         """Satıcıyı vektörel ve optimize şekilde günceller."""
         if 0 <= index < len(self.veri_yoneticisi.satiscilar_df):
-            self.veri_yoneticisi.satiscilar_df.loc[index, list(guncellenmis_satisci.keys())] = list(guncellenmis_satisci.values())
-            self.veri_yoneticisi.satiscilar_df = self._optimize_dataframe(self.veri_yoneticisi.satiscilar_df, 'sales_reps')
-            self.repository.save(self.veri_yoneticisi.satiscilar_df, "sales_reps")
-            if self.event_manager:
-                self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "satisci_duzenle"}))
+            try:
+                # Kategorik sütunları kontrol et ve gerekirse kategorileri güncelle
+                for col, value in guncellenmis_satisci.items():
+                    if col in self.veri_yoneticisi.satiscilar_df.columns and hasattr(self.veri_yoneticisi.satiscilar_df[col], 'cat'):
+                        # Eğer yeni değer mevcut kategorilerde yoksa, kategorileri güncelle
+                        if value not in self.veri_yoneticisi.satiscilar_df[col].cat.categories:
+                            new_categories = self.veri_yoneticisi.satiscilar_df[col].cat.categories.tolist()
+                            new_categories.append(value)
+                            self.veri_yoneticisi.satiscilar_df[col] = self.veri_yoneticisi.satiscilar_df[col].cat.set_categories(new_categories)
+                            self.loglayici.debug(f"'{col}' sütunu için yeni kategori eklendi: {value}")
+                
+                # Şimdi güncellemeyi yap
+                self.veri_yoneticisi.satiscilar_df.loc[index, list(guncellenmis_satisci.keys())] = list(guncellenmis_satisci.values())
+                self.veri_yoneticisi.satiscilar_df = self._optimize_dataframe(self.veri_yoneticisi.satiscilar_df, 'sales_reps')
+                self.repository.save(self.veri_yoneticisi.satiscilar_df, "sales_reps")
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "satisci_duzenle"}))
+            except Exception as e:
+                self.loglayici.error(f"Satisci guncellenirken hata: {str(e)}")
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Satisci guncellenirken hata: {str(e)}"}))
+                raise
 
     def satisci_sil(self, satisci_isim: str) -> None:
         """Satıcıyı vektörel şekilde siler."""
@@ -261,26 +301,89 @@ class SatisYoneticisi:
 
     def satis_ekle(self, yeni_satis: Dict[str, Any]) -> None:
         """Satışı optimize şekilde ekler (Decimal ile)."""
-        yeni_satis_df = pd.DataFrame([yeni_satis])
-        yeni_satis_df = self._optimize_dataframe(yeni_satis_df, 'sales')
-        
-        # Toplam tutar hesapla (örnek olarak)
-        if 'Miktar' in yeni_satis_df.columns and 'Birim Fiyat' in yeni_satis_df.columns:
-            yeni_satis_df['Toplam Tutar'] = yeni_satis_df.apply(
-                lambda row: self.hesapla_toplam_tutar(row['Miktar'], row['Birim Fiyat']), axis=1
-            )
-        
-        if self._bos_df_kontrol(self.veri_yoneticisi.satislar_df, "Satışlar DataFrame'i boş, yeni veriyle başlatılıyor"):
-            self.veri_yoneticisi.satislar_df = yeni_satis_df
-        else:
-            self.veri_yoneticisi.satislar_df = pd.concat([self.veri_yoneticisi.satislar_df, yeni_satis_df], ignore_index=True)
-        
-        if 'Alt Musteri' not in self.veri_yoneticisi.satislar_df.columns:
-            self.veri_yoneticisi.satislar_df['Alt Musteri'] = pd.Series('', dtype='category')
-        
-        self.repository.save(self.veri_yoneticisi.satislar_df, "sales")
-        if self.event_manager:
-            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "add"}))
+        try:
+            # Önce yeni satış verilerini kontrol et
+            self.loglayici.debug(f"Yeni satis ekleniyor: {yeni_satis}")
+            
+            # DataFrame oluştur
+            yeni_satis_df = pd.DataFrame([yeni_satis])
+            
+            # Kategorik sütunları kontrol et ve gerekirse kategorileri güncelle
+            if not self._bos_df_kontrol(self.veri_yoneticisi.satislar_df, "Satışlar DataFrame'i boş, yeni veriyle başlatılıyor"):
+                for col, value in yeni_satis.items():
+                    if col in self.veri_yoneticisi.satislar_df.columns and hasattr(self.veri_yoneticisi.satislar_df[col], 'cat'):
+                        try:
+                            # None veya NaN değerleri kontrol et
+                            if pd.isna(value):
+                                continue
+                                
+                            # Eğer yeni değer mevcut kategorilerde yoksa, kategorileri güncelle
+                            if value not in self.veri_yoneticisi.satislar_df[col].cat.categories:
+                                new_categories = self.veri_yoneticisi.satislar_df[col].cat.categories.tolist()
+                                new_categories.append(value)
+                                self.veri_yoneticisi.satislar_df[col] = self.veri_yoneticisi.satislar_df[col].cat.set_categories(new_categories)
+                                self.loglayici.debug(f"'{col}' sütunu için yeni kategori eklendi: {value}")
+                        except Exception as cat_error:
+                            self.loglayici.error(f"Kategori güncelleme hatası ({col}): {str(cat_error)}")
+                            if self.event_manager:
+                                self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Kategori güncelleme hatası ({col}): {str(cat_error)}"}))
+            
+            # DataFrame'i optimize et
+            try:
+                yeni_satis_df = self._optimize_dataframe(yeni_satis_df, 'sales')
+            except Exception as opt_error:
+                self.loglayici.error(f"DataFrame optimizasyon hatası: {str(opt_error)}")
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"DataFrame optimizasyon hatası: {str(opt_error)}"}))
+                # Optimizasyon hatası olsa bile devam et
+            
+            # Toplam tutar hesapla
+            try:
+                if 'Miktar' in yeni_satis_df.columns and 'Birim Fiyat' in yeni_satis_df.columns:
+                    yeni_satis_df['Toplam Tutar'] = yeni_satis_df.apply(
+                        lambda row: self.hesapla_toplam_tutar(row['Miktar'], row['Birim Fiyat']), axis=1
+                    )
+            except Exception as calc_error:
+                self.loglayici.error(f"Toplam tutar hesaplama hatası: {str(calc_error)}")
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Toplam tutar hesaplama hatası: {str(calc_error)}"}))
+                # Toplam tutar hesaplanamasa bile devam et
+            
+            # DataFrame'i birleştir veya yeni oluştur
+            if self._bos_df_kontrol(self.veri_yoneticisi.satislar_df, "Satışlar DataFrame'i boş, yeni veriyle başlatılıyor"):
+                self.veri_yoneticisi.satislar_df = yeni_satis_df
+            else:
+                try:
+                    self.veri_yoneticisi.satislar_df = pd.concat([self.veri_yoneticisi.satislar_df, yeni_satis_df], ignore_index=True)
+                except Exception as concat_error:
+                    self.loglayici.error(f"DataFrame birleştirme hatası: {str(concat_error)}")
+                    if self.event_manager:
+                        self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"DataFrame birleştirme hatası: {str(concat_error)}"}))
+                    raise
+            
+            # Alt Müşteri sütunu kontrolü
+            if 'Alt Musteri' not in self.veri_yoneticisi.satislar_df.columns:
+                self.veri_yoneticisi.satislar_df['Alt Musteri'] = pd.Series('', dtype='category')
+            
+            # Veritabanına kaydet
+            try:
+                self.repository.save(self.veri_yoneticisi.satislar_df, "sales")
+                self.loglayici.info(f"Satış başarıyla kaydedildi: {yeni_satis.get('Ana Musteri', 'Bilinmeyen')} - {yeni_satis.get('Ay', 'Bilinmeyen')}")
+            except Exception as save_error:
+                self.loglayici.error(f"Veritabanına kaydetme hatası: {str(save_error)}")
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Veritabanına kaydetme hatası: {str(save_error)}"}))
+                raise
+            
+            # Olay bildir
+            if self.event_manager:
+                self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "add"}))
+                
+        except Exception as e:
+            self.loglayici.error(f"Satis ekleme hatasi: {str(e)}")
+            if self.event_manager:
+                self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Satis ekleme hatasi: {str(e)}"}))
+            raise
 
     def pipeline_firsati_ekle(self, yeni_firsat: Dict[str, Any]) -> None:
         """Pipeline fırsatını optimize şekilde ekler (Decimal ile)."""
@@ -309,9 +412,26 @@ class SatisYoneticisi:
     def pipeline_firsati_duzenle(self, index: int, guncellenmis_firsat: Dict[str, Any]) -> None:
         """Pipeline fırsatını vektörel ve optimize şekilde günceller (Decimal ile)."""
         if 0 <= index < len(self.veri_yoneticisi.pipeline_df):
-            self.veri_yoneticisi.pipeline_df.loc[index, list(guncellenmis_firsat.keys())] = list(guncellenmis_firsat.values())
-            self.veri_yoneticisi.pipeline_df = self._optimize_dataframe(self.veri_yoneticisi.pipeline_df, 'pipeline')
-            self.repository.save(self.veri_yoneticisi.pipeline_df, "pipeline")
-            if self.event_manager:
-                self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "pipeline_firsati_duzenle"}))
+            try:
+                # Kategorik sütunları kontrol et ve gerekirse kategorileri güncelle
+                for col, value in guncellenmis_firsat.items():
+                    if col in self.veri_yoneticisi.pipeline_df.columns and hasattr(self.veri_yoneticisi.pipeline_df[col], 'cat'):
+                        # Eğer yeni değer mevcut kategorilerde yoksa, kategorileri güncelle
+                        if value not in self.veri_yoneticisi.pipeline_df[col].cat.categories:
+                            new_categories = self.veri_yoneticisi.pipeline_df[col].cat.categories.tolist()
+                            new_categories.append(value)
+                            self.veri_yoneticisi.pipeline_df[col] = self.veri_yoneticisi.pipeline_df[col].cat.set_categories(new_categories)
+                            self.loglayici.debug(f"'{col}' sütunu için yeni kategori eklendi: {value}")
+                
+                # Şimdi güncellemeyi yap
+                self.veri_yoneticisi.pipeline_df.loc[index, list(guncellenmis_firsat.keys())] = list(guncellenmis_firsat.values())
+                self.veri_yoneticisi.pipeline_df = self._optimize_dataframe(self.veri_yoneticisi.pipeline_df, 'pipeline')
+                self.repository.save(self.veri_yoneticisi.pipeline_df, "pipeline")
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "pipeline_firsati_duzenle"}))
+            except Exception as e:
+                self.loglayici.error(f"Pipeline guncellenirken hata: {str(e)}")
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Pipeline guncellenirken hata: {str(e)}"}))
+                raise
 

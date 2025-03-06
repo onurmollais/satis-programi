@@ -48,12 +48,29 @@ class MusteriYoneticisi:
             guncellenmis_musteri: Guncel musteri bilgilerini iceren sozluk
         """
         if index >= 0 and index < len(self.veri_yoneticisi.musteriler_df):
-            for key, value in guncellenmis_musteri.items():
-                self.veri_yoneticisi.musteriler_df.at[index, key] = value
-            self.repository.save(self.veri_yoneticisi.musteriler_df, "customers")
-            
-            if self.event_manager:
-                self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "musteri_duzenle"}))
+            try:
+                # Kategorik sütunları kontrol et ve gerekirse kategorileri güncelle
+                for col, value in guncellenmis_musteri.items():
+                    if col in self.veri_yoneticisi.musteriler_df.columns and hasattr(self.veri_yoneticisi.musteriler_df[col], 'cat'):
+                        # Eğer yeni değer mevcut kategorilerde yoksa, kategorileri güncelle
+                        if value not in self.veri_yoneticisi.musteriler_df[col].cat.categories:
+                            new_categories = self.veri_yoneticisi.musteriler_df[col].cat.categories.tolist()
+                            new_categories.append(value)
+                            self.veri_yoneticisi.musteriler_df[col] = self.veri_yoneticisi.musteriler_df[col].cat.set_categories(new_categories)
+                            self.loglayici.debug(f"'{col}' sütunu için yeni kategori eklendi: {value}")
+                
+                # Şimdi güncellemeyi yap
+                for key, value in guncellenmis_musteri.items():
+                    self.veri_yoneticisi.musteriler_df.at[index, key] = value
+                self.repository.save(self.veri_yoneticisi.musteriler_df, "customers")
+                
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "musteri_duzenle"}))
+            except Exception as e:
+                self.loglayici.error(f"Potansiyel musteri guncelleme hatasi: {str(e)}")
+                if self.event_manager:
+                    self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Potansiyel musteri guncelleme hatasi: {str(e)}"}))
+                raise
     
     def musteri_sil(self, musteri_adi: str) -> None:
         """

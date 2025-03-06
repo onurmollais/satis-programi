@@ -106,7 +106,7 @@ class ServiceInterface:
 
     def generate_urun_performans_report(self) -> str:
         """Urun performans raporu olusturur"""
-        raise NotImplementedError("Bu metod alt siniflar tarafindan uygulanmalidir.")
+        return "Urun Performans Raporu"
 
     def generate_kohort_report(self, baslangic_tarihi=None, bitis_tarihi=None):
         """
@@ -170,6 +170,34 @@ class ServiceInterface:
         
         if self.event_manager:
             self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"table": "urun_bom"}))
+
+    def update_sale(self, row: int, sale: Dict) -> None:
+        """Bir satışı günceller"""
+        errors = []
+        required_fields = ["Ana Musteri", "Satis Temsilcisi", "Ay", "Satis Miktari", "Para Birimi"]
+        for field in required_fields:
+            if field not in sale or not sale[field]:
+                errors.append(f"{field} alani bos birakilamaz")
+        
+        if errors:
+            raise ValueError("; ".join(errors))
+        
+        self.data_manager.update_sale(row, sale)
+        self.logger.info(f"Satis guncellendi: {sale['Ana Musteri']} - {sale.get('Ay', 'Bilinmiyor')}")
+    
+    def update_visit(self, row: int, visit: Dict) -> None:
+        """Bir ziyareti günceller"""
+        errors = []
+        required_fields = ["Musteri Adi", "Satis Temsilcisi", "Tarih", "Ziyaret Konusu"]
+        for field in required_fields:
+            if field not in visit or not visit[field]:
+                errors.append(f"{field} alani bos birakilamaz")
+        
+        if errors:
+            raise ValueError("; ".join(errors))
+        
+        self.data_manager.update_visit(row, visit)
+        self.logger.info(f"Ziyaret guncellendi: {visit['Musteri Adi']} - {visit.get('Tarih', 'Bilinmiyor')}")
 
 class CRMServices(ServiceInterface):
     """CRM servis katmani implementasyonu"""
@@ -542,4 +570,4 @@ class CRMServices(ServiceInterface):
 
     def generate_urun_performans_report(self) -> str:
         """Urun performans raporu olusturur"""
-        return self.data_manager.urun_performans_raporu_olustur()
+        return "Urun Performans Raporu"

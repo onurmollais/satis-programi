@@ -11,7 +11,7 @@ import pandas as pd
 import re
 from events import Event, EventManager, EVENT_DATA_UPDATED, EVENT_UI_UPDATED, EVENT_ERROR_OCCURRED
 from veri_yukleme_worker import VeriYuklemeWorker
-from satis_worker import SatisEklemeWorker, ZiyaretEklemeWorker, SatisSilmeWorker, ZiyaretSilmeWorker
+from satis_worker import SatisEklemeWorker, ZiyaretEklemeWorker, SatisSilmeWorker, ZiyaretSilmeWorker, SatisDuzenlemeWorker, ZiyaretDuzenlemeWorker
 from ui_interface import UIInterface
 from thread_worker import Worker  # Varsayıyorum ki bu dosya mevcut
 
@@ -1566,28 +1566,45 @@ class AnaPencere(QMainWindow, UIInterface):
         self.satis_tablosu_guncelle()
 
     def satis_tablosu_guncelle(self):
-        """Satis tablosunu gunceller"""
+        """Satış tablosunu günceller."""
         try:
-            satis_df = self.services.data_manager.satislar_df
+            # Satışlar DataFrame'ini al
+            satislar_df = self.services.data_manager.satislar_df
             
-            self.satis_tablosu.setRowCount(0)
-            
-            if satis_df is None or satis_df.empty:
+            # DataFrame boş veya None ise erken dön
+            if satislar_df is None or satislar_df.empty:
+                self.satis_tablosu.setRowCount(0)
                 return
-                
-            self.satis_tablosu.setRowCount(len(satis_df))
             
+            # Tablo satır sayısını ayarla
+            self.satis_tablosu.setRowCount(len(satislar_df))
+            
+            # Sütun bilgilerini tanımla
             columns = ["Ana Musteri", "Alt Musteri", "Satis Temsilcisi", "Ay", 
                       "Urun Kodu", "Urun Adi", "Miktar", "Birim Fiyat", 
                       "Satis Miktari", "Para Birimi"]
             
-            for i, row in satis_df.iterrows():
-                for j, col in enumerate(columns):
-                    value = str(row.get(col, "")) if not pd.isna(row.get(col, "")) else "Yok" if col == "Alt Musteri" else ""
-                    self.satis_tablosu.setItem(i, j, QTableWidgetItem(value))
+            # Tablo başlıklarını ayarla
+            self.satis_tablosu.setHorizontalHeaderLabels(columns)
+            
+            # DataFrame'i dolaş ve tabloyu doldur
+            for i, row in satislar_df.iterrows():
+                try:
+                    for j, col in enumerate(columns):
+                        value = str(row.get(col, "")) if not pd.isna(row.get(col, "")) else "Yok" if col == "Alt Musteri" else ""
+                        self.satis_tablosu.setItem(i, j, QTableWidgetItem(value))
+                except Exception as row_error:
+                    self.loglayici.error(f"Satir {i} islenirken hata: {str(row_error)}")
+                    # Hatali satiri atla ve devam et
+            
+            # Sütun genişliklerini ayarla
+            self.satis_tablosu.resizeColumnsToContents()
+            
         except Exception as e:
             self.loglayici.error(f"Satis tablosu guncellenirken hata: {str(e)}")
-            QMessageBox.critical(self, "Hata", f"Satis tablosu guncellenirken hata: {str(e)}")
+            QMessageBox.critical(self, "Hata", f"Satış tablosu güncellenirken hata oluştu: {str(e)}")
+            # Tabloyu temizle
+            self.satis_tablosu.setRowCount(0)
 
     def satis_ekle(self):
         """Yeni satış ekleme işlemini thread-safe şekilde gerçekleştirir."""
@@ -1694,7 +1711,7 @@ class AnaPencere(QMainWindow, UIInterface):
                 progress_dialog.show()
 
                 # Worker oluştur
-                worker = SatisEklemeWorker(yeni_satis, self.services)
+                worker = SatisEklemeWorker(self.services, yeni_satis)
                 worker.signals.tamamlandi.connect(lambda: self._satis_ekle_tamamlandi(dialog, progress_dialog, yeni_satis["Ana Musteri"], ay_str))
                 worker.signals.hata.connect(lambda hata: self._islem_hata(hata, progress_dialog))
                 self.thread_pool.start(worker)
@@ -1708,13 +1725,38 @@ class AnaPencere(QMainWindow, UIInterface):
 
     def _satis_ekle_tamamlandi(self, dialog, progress_dialog, musteri_adi, ay):
         """Satış ekleme tamamlandığında ana thread'de çalışır."""
-        progress_dialog.close()
-        dialog.accept()
-        self.satis_tablosu_guncelle()
-        QMessageBox.information(self, "Bilgi", f"{musteri_adi} için {ay} ayına satış başarıyla eklendi.")
-        self.loglayici.info(f"Satış eklendi: {musteri_adi}, {ay}")
-        if hasattr(self, 'event_manager') and self.event_manager:
-            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "add"}))
+        try:
+            if progress_dialog and progress_dialog.isVisible():
+                progress_dialog.close()
+            
+            if dialog and dialog.isVisible():
+                dialog.accept()
+            
+            # Tabloyu güncelle
+            try:
+                self.satis_tablosu_guncelle()
+            except Exception as table_error:
+                self.loglayici.error(f"Satis tablosu guncellenirken hata: {str(table_error)}")
+                # Tablo güncellenemese bile devam et
+            
+            # Bilgi mesajı göster
+            QMessageBox.information(self, "Bilgi", f"{musteri_adi} için {ay} ayına satış başarıyla eklendi.")
+            self.loglayici.info(f"Satış eklendi: {musteri_adi}, {ay}")
+            
+            # Olay bildir
+            if hasattr(self, 'event_manager') and self.event_manager:
+                self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"type": "sales", "action": "add"}))
+        except Exception as e:
+            self.loglayici.error(f"Satis ekleme tamamlandi isleminde hata: {str(e)}")
+            QMessageBox.critical(self, "Hata", f"Satış ekleme işlemi tamamlandı ancak arayüz güncellenirken hata oluştu: {str(e)}")
+            # Dialog ve progress dialog'u kapatmaya çalış
+            try:
+                if progress_dialog and progress_dialog.isVisible():
+                    progress_dialog.close()
+                if dialog and dialog.isVisible():
+                    dialog.reject()
+            except:
+                pass
 
     def satis_duzenle(self):
         selected_items = self.satis_tablosu.selectedItems()
@@ -1886,12 +1928,17 @@ class AnaPencere(QMainWindow, UIInterface):
                         "Para Birimi": para_birimi_giris.currentText()
                     }
                     
-                    # Duzeltme: Mevcut sutunlara gore guncelleme yap
-                    for col, value in yeni_bilgiler.items():
-                        if col in self.services.data_manager.satislar_df.columns:
-                            self.services.data_manager.satislar_df.at[row, col] = value
+                    # İlerleme göstergesi
+                    progress_dialog = QProgressDialog("Satış güncelleniyor...", "İptal", 0, 0, self)
+                    progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+                    progress_dialog.show()
+
+                    # Worker oluştur
+                    worker = SatisDuzenlemeWorker(self.services, row, yeni_bilgiler)
+                    worker.signals.tamamlandi.connect(lambda: self._satis_duzenle_tamamlandi(dialog, progress_dialog, yeni_bilgiler["Ana Musteri"], ay_str))
+                    worker.signals.hata.connect(lambda hata: self._islem_hata(hata, progress_dialog))
+                    self.thread_pool.start(worker)
                     
-                    self.services.data_manager.repository.save(self.services.data_manager.satislar_df, "sales")  # Satislari kaydetme
                     
                     # Musterinin son satin alma tarihini guncelle
                     musteri_adi = yeni_bilgiler["Ana Musteri"]
@@ -1924,6 +1971,19 @@ class AnaPencere(QMainWindow, UIInterface):
         else:
             QMessageBox.warning(self, "Uyari", "Lutfen duzenlemek icin bir satis secin.")
 
+    def _satis_duzenle_tamamlandi(self, dialog, progress_dialog, musteri_adi, ay):
+        """Satış düzenleme tamamlandığında ana thread'de çalışır."""
+        progress_dialog.close()
+        dialog.accept()
+        self.satis_tablosu_guncelle()
+        self.musteri_tablosu_guncelle()
+        
+        # Gosterge panelini guncelle
+        if hasattr(self, 'gosterge_paneli_guncelle'):
+            self.gosterge_paneli_guncelle()
+        
+        self.loglayici.info(f"Satis guncellendi: {musteri_adi} - {ay}")
+        
     def satis_sil(self):
         """Satış silme işlemini thread-safe şekilde gerçekleştirir."""
         selected_items = self.satis_tablosu.selectedItems()
@@ -2212,11 +2272,11 @@ class AnaPencere(QMainWindow, UIInterface):
 
 
     def _islem_hata(self, hata_mesaji, progress_dialog=None):
-        """Worker'dan gelen hata mesajlarını ana thread'de işler."""
+        """İşlem sırasında hata oluştuğunda çağrılır."""
         if progress_dialog:
             progress_dialog.close()
         QMessageBox.critical(self, "Hata", str(hata_mesaji))
-        self.loglayici.error(f"İşlem sırasında hata: {hata_mesaji}")
+        self.loglayici.error(f"Islem hatasi: {hata_mesaji}")
 
     def ziyaret_duzenle(self):
         selected_items = self.ziyaret_tablosu.selectedItems()
@@ -2331,12 +2391,18 @@ class AnaPencere(QMainWindow, UIInterface):
                     "Ziyaret Tarihi": tarih_giris.date().toString("yyyy-MM-dd"),  # Eski alan icin uyumluluk
                     "Ziyaret Konusu": konu_giris.text().strip()  # Eski alan icin uyumluluk
                 }
-                # Duzeltme: self.veri_yoneticisi ve self.repository.save yerine services kullaniyoruz
-                self.services.data_manager.ziyaretler_df.iloc[row] = pd.Series(yeni_bilgiler)
-                self.services.data_manager.repository.save(self.services.data_manager.ziyaretler_df, "visits")  # Veritabanini kaydetme
-                self.ziyaret_tablosu_guncelle()
-                dialog.accept()
-                self.loglayici.info(f"Ziyaret guncellendi: {yeni_bilgiler['Musteri Adi']} - {yeni_bilgiler['Satis Temsilcisi']}")
+                
+                # İlerleme göstergesi
+                progress_dialog = QProgressDialog("Ziyaret güncelleniyor...", "İptal", 0, 0, self)
+                progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+                progress_dialog.show()
+
+                # Worker oluştur
+                worker = ZiyaretDuzenlemeWorker(self.services, row, yeni_bilgiler)
+                worker.signals.tamamlandi.connect(lambda: self._ziyaret_duzenle_tamamlandi(dialog, progress_dialog, yeni_bilgiler["Musteri Adi"]))
+                worker.signals.hata.connect(lambda hata: self._islem_hata(hata, progress_dialog))
+                self.thread_pool.start(worker)
+                
             except ValueError as ve:
                 QMessageBox.warning(self, "Uyari", str(ve))
             except Exception as e:
@@ -2366,5 +2432,19 @@ class AnaPencere(QMainWindow, UIInterface):
         """Ziyaret tablosunu duruma gore filtreler"""
         # Mevcut arama metnini de dikkate alarak filtreleme yap
         self.ziyaret_ara()
+
+    def _ziyaret_duzenle_tamamlandi(self, dialog, progress_dialog, musteri_adi):
+        """Ziyaret düzenleme tamamlandığında ana thread'de çalışır."""
+        progress_dialog.close()
+        dialog.accept()
+        self.ziyaret_tablosu_guncelle()
+        self.musteri_tablosu_guncelle()
+        
+        # Gosterge panelini guncelle
+        if hasattr(self, 'gosterge_paneli_guncelle'):
+            self.gosterge_paneli_guncelle()
+        
+        self.loglayici.info(f"Ziyaret guncellendi: {musteri_adi}")
+        
 
         

@@ -6,11 +6,12 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTa
                              QGroupBox, QSizePolicy, QGridLayout, QScrollArea, QPushButton, QDialog,
                              QDialogButtonBox, QAbstractItemView, QFrame, QButtonGroup, QStackedWidget,
                              QApplication)
-from PyQt6.QtCore import Qt, QDate, QTimer, QUrl 
+from PyQt6.QtCore import Qt, QDate, QTimer, QUrl, QThreadPool, pyqtSignal
 from PyQt6.QtGui import QIcon, QAction  # QAction sinifi buraya tasindi
 from veri_yoneticisi import VeriYoneticisi
 from gorsellestirici import Gorsellestirici  
 from services import CRMServices, ServiceInterface  # Guncellenmis import
+from satis_worker import SatisEklemeWorker, ZiyaretEklemeWorker, SatisSilmeWorker, ZiyaretSilmeWorker
 import pandas as pd
 import sqlite3
 import folium
@@ -30,7 +31,7 @@ from ui_satis import AnaPencere as SatisAnaPencere
 from ui_hammadde_bom import AnaPencere as HammaddeAnaPencere
 from veri_yukleme_worker import VeriYuklemeWorker
 from ui_interface import UIInterface
-# Yeni importlar
+import re
 from raporlama import Raporlama
 from sikayet_yonetimi import SikayetYonetimi
 from datetime import datetime
@@ -100,6 +101,10 @@ class AnaPencere(QMainWindow, UIInterface):
         self.loglayici = loglayici
         self.event_manager = event_manager
         self.gorsellestirici = Gorsellestirici(self.loglayici, self.event_manager, self.services)
+        
+        # Thread pool olustur
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(4)  # Maksimum 4 thread
 
         # Internet baglantisi kontrolu ekle
         self.internet_baglantisi = InternetBaglantisi(loglayici, event_manager)

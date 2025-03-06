@@ -150,9 +150,14 @@ class SikayetYonetimi:
                         "Durum": durum_giris.currentText()
                     }
                     
-                    self.services.add_complaint(yeni_sikayet)  # CRMServices uzerinden ekleme
-                    self.sikayet_tablosu_guncelle()
-                    dialog.accept()
+                    # Thread pool kullanarak arka planda sikayet ekleme islemi
+                    if hasattr(self.parent, 'thread_pool') and self.parent.thread_pool is not None:
+                        self.parent.thread_pool.submit(self._sikayet_ekle_thread, yeni_sikayet, dialog)
+                    else:
+                        # Thread pool yoksa normal sekilde ekle
+                        self.services.add_complaint(yeni_sikayet)  # CRMServices uzerinden ekleme
+                        self.sikayet_tablosu_guncelle()
+                        dialog.accept()
                     
                     self.loglayici.info(f"Yeni sikayet eklendi: {yeni_sikayet['Musteri Adi']} - {yeni_sikayet['Sikayet Turu']}")
                     QMessageBox.information(self.parent, "Basarili", "Sikayet basariyla eklendi.")
@@ -236,15 +241,20 @@ class SikayetYonetimi:
                         "Durum": durum_giris.currentText()
                     }
                     
-                    # Sikayet guncelleme islemi
-                    self.services.data_manager.sikayetler_df.iloc[row] = pd.Series(guncellenmis_sikayet)
-                    self.services.data_manager.repository.save(self.services.data_manager.sikayetler_df, "complaints")
-                    
-                    self.sikayet_tablosu_guncelle()
-                    dialog.accept()
-                    
-                    self.loglayici.info(f"Sikayet guncellendi: {guncellenmis_sikayet['Musteri Adi']} - {guncellenmis_sikayet['Sikayet Turu']}")
-                    QMessageBox.information(self.parent, "Basarili", "Sikayet basariyla guncellendi.")
+                    # Thread pool kullanarak arka planda sikayet guncelleme islemi
+                    if hasattr(self.parent, 'thread_pool') and self.parent.thread_pool is not None:
+                        self.parent.thread_pool.submit(self._sikayet_guncelle_thread, row, guncellenmis_sikayet, dialog)
+                    else:
+                        # Thread pool yoksa normal sekilde guncelle
+                        # Sikayet guncelleme islemi
+                        self.services.data_manager.sikayetler_df.iloc[row] = pd.Series(guncellenmis_sikayet)
+                        self.services.data_manager.repository.save(self.services.data_manager.sikayetler_df, "complaints")
+                        
+                        self.sikayet_tablosu_guncelle()
+                        dialog.accept()
+                        
+                        self.loglayici.info(f"Sikayet guncellendi: {guncellenmis_sikayet['Musteri Adi']} - {guncellenmis_sikayet['Sikayet Turu']}")
+                        QMessageBox.information(self.parent, "Basarili", "Sikayet basariyla guncellendi.")
                 except Exception as e:
                     QMessageBox.critical(self.parent, "Hata", f"Sikayet guncellenirken hata: {str(e)}")
                     self.loglayici.error(f"Sikayet guncelleme hatasi: {str(e)}")
@@ -278,14 +288,157 @@ class SikayetYonetimi:
             )
             
             if cevap == QMessageBox.StandardButton.Yes:
-                # Sikayet silme islemi
-                self.services.data_manager.sikayetler_df = self.services.data_manager.sikayetler_df.drop(row).reset_index(drop=True)
-                self.services.data_manager.repository.save(self.services.data_manager.sikayetler_df, "complaints")
-                
-                self.sikayet_tablosu_guncelle()
-                
-                self.loglayici.info(f"Sikayet silindi: {musteri_adi} - {sikayet_turu}")
-                QMessageBox.information(self.parent, "Basarili", "Sikayet basariyla silindi.")
+                # Thread pool kullanarak arka planda sikayet silme islemi
+                if hasattr(self.parent, 'thread_pool') and self.parent.thread_pool is not None:
+                    self.parent.thread_pool.submit(self._sikayet_sil_thread, row, musteri_adi, sikayet_turu)
+                else:
+                    # Thread pool yoksa normal sekilde sil
+                    # Sikayet silme islemi
+                    self.services.data_manager.sikayetler_df = self.services.data_manager.sikayetler_df.drop(row).reset_index(drop=True)
+                    self.services.data_manager.repository.save(self.services.data_manager.sikayetler_df, "complaints")
+                    
+                    self.sikayet_tablosu_guncelle()
+                    
+                    self.loglayici.info(f"Sikayet silindi: {musteri_adi} - {sikayet_turu}")
+                    QMessageBox.information(self.parent, "Basarili", "Sikayet basariyla silindi.")
         except Exception as e:
             self.loglayici.error(f"Sikayet silme hatasi: {str(e)}")
-            QMessageBox.critical(self.parent, "Hata", f"Sikayet silinirken hata: {str(e)}") 
+            QMessageBox.critical(self.parent, "Hata", f"Sikayet silinirken hata: {str(e)}")
+    
+    def _sikayet_ekle_thread(self, yeni_sikayet, dialog):
+        """
+        Thread pool ile arka planda sikayet ekleme islemini gerceklestirir.
+        
+        Args:
+            yeni_sikayet: Eklenecek sikayet bilgileri
+            dialog: Kapatilacak dialog
+        """
+        try:
+            self.services.add_complaint(yeni_sikayet)
+            
+            # UI guncellemesi icin ana thread'e geri don
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            QMetaObject.invokeMethod(self, "_sikayet_ekleme_tamamlandi", 
+                                    Qt.ConnectionType.QueuedConnection,
+                                    Q_ARG(bool, True),
+                                    Q_ARG(object, dialog))
+        except Exception as e:
+            self.loglayici.error(f"Sikayet ekleme thread hatasi: {str(e)}")
+            # Hata durumunda ana thread'e geri don
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            QMetaObject.invokeMethod(self, "_sikayet_ekleme_tamamlandi", 
+                                    Qt.ConnectionType.QueuedConnection,
+                                    Q_ARG(bool, False),
+                                    Q_ARG(object, dialog),
+                                    Q_ARG(str, str(e)))
+    
+    def _sikayet_ekleme_tamamlandi(self, basarili, dialog, hata_mesaji=None):
+        """
+        Thread pool ile sikayet ekleme islemi tamamlandiginda cagrilan metod.
+        
+        Args:
+            basarili: Islemin basarili olup olmadigi
+            dialog: Kapatilacak dialog
+            hata_mesaji: Hata durumunda hata mesaji
+        """
+        if basarili:
+            self.sikayet_tablosu_guncelle()
+            dialog.accept()
+        else:
+            QMessageBox.critical(self.parent, "Hata", f"Sikayet eklenirken hata: {hata_mesaji}") 
+
+    def _sikayet_guncelle_thread(self, row, guncellenmis_sikayet, dialog):
+        """
+        Thread pool ile arka planda sikayet guncelleme islemi gerceklestirir.
+        
+        Args:
+            row: Guncellenecek sikayetin indeksi
+            guncellenmis_sikayet: Guncellenecek sikayet bilgileri
+            dialog: Kapatilacak dialog
+        """
+        try:
+            # Sikayet guncelleme islemi
+            self.services.data_manager.sikayetler_df.iloc[row] = pd.Series(guncellenmis_sikayet)
+            self.services.data_manager.repository.save(self.services.data_manager.sikayetler_df, "complaints")
+            
+            # UI guncellemesi icin ana thread'e geri don
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            QMetaObject.invokeMethod(self, "_sikayet_guncelleme_tamamlandi", 
+                                    Qt.ConnectionType.QueuedConnection,
+                                    Q_ARG(bool, True),
+                                    Q_ARG(object, dialog),
+                                    Q_ARG(dict, guncellenmis_sikayet))
+        except Exception as e:
+            self.loglayici.error(f"Sikayet guncelleme thread hatasi: {str(e)}")
+            # Hata durumunda ana thread'e geri don
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            QMetaObject.invokeMethod(self, "_sikayet_guncelleme_tamamlandi", 
+                                    Qt.ConnectionType.QueuedConnection,
+                                    Q_ARG(bool, False),
+                                    Q_ARG(object, dialog),
+                                    Q_ARG(str, str(e)))
+    
+    def _sikayet_guncelleme_tamamlandi(self, basarili, dialog, guncellenmis_sikayet=None, hata_mesaji=None):
+        """
+        Thread pool ile sikayet guncelleme islemi tamamlandiginda cagrilan metod.
+        
+        Args:
+            basarili: Islemin basarili olup olmadigi
+            dialog: Kapatilacak dialog
+            guncellenmis_sikayet: Guncellenen sikayet bilgileri
+            hata_mesaji: Hata durumunda hata mesaji
+        """
+        if basarili:
+            self.sikayet_tablosu_guncelle()
+            dialog.accept()
+            self.loglayici.info(f"Sikayet guncellendi: {guncellenmis_sikayet['Musteri Adi']} - {guncellenmis_sikayet['Sikayet Turu']}")
+            QMessageBox.information(self.parent, "Basarili", "Sikayet basariyla guncellendi.")
+        else:
+            QMessageBox.critical(self.parent, "Hata", f"Sikayet guncellenirken hata: {hata_mesaji}")
+
+    def _sikayet_sil_thread(self, row, musteri_adi, sikayet_turu):
+        """
+        Thread pool ile arka planda sikayet silme islemini gerceklestirir.
+        
+        Args:
+            row: Silinecek sikayetin indeksi
+            musteri_adi: Silinecek sikayetin musteri adi
+            sikayet_turu: Silinecek sikayetin turu
+        """
+        try:
+            # Sikayet silme islemi
+            self.services.data_manager.sikayetler_df = self.services.data_manager.sikayetler_df.drop(row).reset_index(drop=True)
+            self.services.data_manager.repository.save(self.services.data_manager.sikayetler_df, "complaints")
+            
+            # UI guncellemesi icin ana thread'e geri don
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            QMetaObject.invokeMethod(self, "_sikayet_silme_tamamlandi", 
+                                    Qt.ConnectionType.QueuedConnection,
+                                    Q_ARG(bool, True),
+                                    Q_ARG(str, musteri_adi),
+                                    Q_ARG(str, sikayet_turu))
+        except Exception as e:
+            self.loglayici.error(f"Sikayet silme thread hatasi: {str(e)}")
+            # Hata durumunda ana thread'e geri don
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            QMetaObject.invokeMethod(self, "_sikayet_silme_tamamlandi", 
+                                    Qt.ConnectionType.QueuedConnection,
+                                    Q_ARG(bool, False),
+                                    Q_ARG(str, str(e)))
+    
+    def _sikayet_silme_tamamlandi(self, basarili, musteri_adi=None, sikayet_turu=None, hata_mesaji=None):
+        """
+        Thread pool ile sikayet silme islemi tamamlandiginda cagrilan metod.
+        
+        Args:
+            basarili: Islemin basarili olup olmadigi
+            musteri_adi: Silinen sikayetin musteri adi
+            sikayet_turu: Silinen sikayetin turu
+            hata_mesaji: Hata durumunda hata mesaji
+        """
+        if basarili:
+            self.sikayet_tablosu_guncelle()
+            self.loglayici.info(f"Sikayet silindi: {musteri_adi} - {sikayet_turu}")
+            QMessageBox.information(self.parent, "Basarili", "Sikayet basariyla silindi.")
+        else:
+            QMessageBox.critical(self.parent, "Hata", f"Sikayet silinirken hata: {hata_mesaji}")

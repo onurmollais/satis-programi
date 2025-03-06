@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import logging
+import threading  # self._lock için gerekli import eklendi
 from typing import Dict, Optional, List, Tuple, Iterator, Callable, Any
 from repository import RepositoryInterface
 from io import BytesIO  # Yeni eklenen import
@@ -18,22 +19,21 @@ from musteri_yoneticisi import MusteriYoneticisi
 from urun_yoneticisi import UrunYoneticisi
 
 class VeriYoneticisi:
-    def __init__(self, repository: RepositoryInterface, loglayici, event_manager):
+    def __init__(self, repository, loglayici=None, event_manager=None):
         self.repository = repository
-        self.loglayici = loglayici
         self.event_manager = event_manager
-        
-        # DataFrame'leri tanimla
-        self.satiscilar_df = None
-        self.hedefler_df = None
-        self.aylik_hedefler_df = None
+        self.loglayici = loglayici
+        self._lock = threading.Lock()
         self.satislar_df = None
+        self.ziyaretler_df = None
         self.pipeline_df = None
         self.musteriler_df = None
-        self.ziyaretler_df = None
         self.sikayetler_df = None
         self.hammadde_df = None
         self.urun_bom_df = None
+        self.hedefler_df = None
+        self.aylik_hedefler_df = None
+        self.satiscilar_df = None
         
         # Urun hesaplayici olustur
         self.urun_hesaplayici = UrunHesaplayici(self.loglayici, event_manager)
@@ -794,3 +794,134 @@ class VeriYoneticisi:
             Islenmis veri cercevesi
         """
         return self.veri_yukleyici.parcali_veri_yukle(dosya_yolu, tablo_adi, parca_boyutu, islem_fonksiyonu)
+    
+    def add_sale(self, sale_data):
+        """Yeni satış ekler ve kategorik sütunları günceller."""
+        try:
+            with self._lock:
+                # Kategorik sütunları kontrol et ve gerekirse güncelle
+                if self.satislar_df is not None and not self.satislar_df.empty:
+                    for col, value in sale_data.items():
+                        if col in self.satislar_df.columns and hasattr(self.satislar_df[col], 'cat'):
+                            try:
+                                # None veya NaN değerleri kontrol et
+                                if pd.isna(value):
+                                    continue
+                                    
+                                # Eğer yeni değer mevcut kategorilerde yoksa, kategorileri güncelle
+                                if value not in self.satislar_df[col].cat.categories:
+                                    new_categories = self.satislar_df[col].cat.categories.tolist()
+                                    new_categories.append(value)
+                                    self.satislar_df[col] = self.satislar_df[col].cat.set_categories(new_categories)
+                                    if self.loglayici:
+                                        self.loglayici.debug(f"'{col}' sütunu için yeni kategori eklendi: {value}")
+                            except Exception as cat_error:
+                                if self.loglayici:
+                                    self.loglayici.error(f"Kategori güncelleme hatası ({col}): {str(cat_error)}")
+                                if self.event_manager:
+                                    self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Kategori güncelleme hatası ({col}): {str(cat_error)}"}))
+                
+                # Yeni satış verisini ekle
+                if self.satislar_df is None or self.satislar_df.empty:
+                    self.satislar_df = pd.DataFrame([sale_data])
+                else:
+                    self.satislar_df = pd.concat([self.satislar_df, pd.DataFrame([sale_data])], ignore_index=True)
+                
+                # Veritabanına kaydet
+                self.repository.save(self.satislar_df, "sales")
+                
+            # Olay bildir
+            if self.event_manager:
+                self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "add_sale"}))
+                
+        except Exception as e:
+            if self.loglayici:
+                self.loglayici.error(f"Satis ekleme hatasi: {str(e)}")
+            if self.event_manager:
+                self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Satis ekleme hatasi: {str(e)}"}))
+            raise
+
+    def add_visit(self, visit_data):
+        with self._lock:
+            if self.ziyaretler_df is None or self.ziyaretler_df.empty:
+                self.ziyaretler_df = pd.DataFrame([visit_data])
+            else:
+                self.ziyaretler_df = pd.concat([self.ziyaretler_df, pd.DataFrame([visit_data])], ignore_index=True)
+            self.repository.save(self.ziyaretler_df, "visits")
+        if self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "add_visit"}))
+
+    def delete_sale(self, index):
+        with self._lock:
+            if self.satislar_df is not None and not self.satislar_df.empty:
+                self.satislar_df = self.satislar_df.drop(index).reset_index(drop=True)
+                self.repository.save(self.satislar_df, "sales")
+        if self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "delete_sale"}))
+
+    def delete_visit(self, index):
+        with self._lock:
+            if self.ziyaretler_df is not None and not self.ziyaretler_df.empty:
+                self.ziyaretler_df = self.ziyaretler_df.drop(index).reset_index(drop=True)
+                self.repository.save(self.ziyaretler_df, "visits")
+        if self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "delete_visit"}))
+
+    def update_sale(self, row, yeni_bilgiler):
+        """Satış bilgilerini günceller ve kategorik sütunları kontrol eder."""
+        try:
+            with self._lock:
+                if self.satislar_df is not None and not self.satislar_df.empty:
+                    # Kategorik sütunları kontrol et ve gerekirse güncelle
+                    for col, value in yeni_bilgiler.items():
+                        if col in self.satislar_df.columns and hasattr(self.satislar_df[col], 'cat'):
+                            try:
+                                # None veya NaN değerleri kontrol et
+                                if pd.isna(value):
+                                    continue
+                                    
+                                # Eğer yeni değer mevcut kategorilerde yoksa, kategorileri güncelle
+                                if value not in self.satislar_df[col].cat.categories:
+                                    new_categories = self.satislar_df[col].cat.categories.tolist()
+                                    new_categories.append(value)
+                                    self.satislar_df[col] = self.satislar_df[col].cat.set_categories(new_categories)
+                                    if self.loglayici:
+                                        self.loglayici.debug(f"'{col}' sütunu için yeni kategori eklendi: {value}")
+                            except Exception as cat_error:
+                                if self.loglayici:
+                                    self.loglayici.error(f"Kategori güncelleme hatası ({col}): {str(cat_error)}")
+                                if self.event_manager:
+                                    self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Kategori güncelleme hatası ({col}): {str(cat_error)}"}))
+                    
+                    # Satış bilgilerini güncelle
+                    for col, value in yeni_bilgiler.items():
+                        if col in self.satislar_df.columns:
+                            self.satislar_df.at[row, col] = value
+                    
+                    # Veritabanına kaydet
+                    self.repository.save(self.satislar_df, "sales")
+                    
+                    # Olay bildir
+                    if self.event_manager:
+                        self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "update_sale"}))
+                else:
+                    if self.loglayici:
+                        self.loglayici.warning("Satislar DataFrame'i bos veya None, guncelleme yapilamadi")
+                    if self.event_manager:
+                        self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": "Satislar DataFrame'i bos veya None, guncelleme yapilamadi"}))
+        except Exception as e:
+            if self.loglayici:
+                self.loglayici.error(f"Satis guncelleme hatasi: {str(e)}")
+            if self.event_manager:
+                self.event_manager.emit(Event(EVENT_ERROR_OCCURRED, {"error": f"Satis guncelleme hatasi: {str(e)}"}))
+            raise
+
+    def update_visit(self, row, yeni_bilgiler):
+        with self._lock:
+            if self.ziyaretler_df is not None and not self.ziyaretler_df.empty:
+                for col, value in yeni_bilgiler.items():
+                    if col in self.ziyaretler_df.columns:
+                        self.ziyaretler_df.at[row, col] = value
+                self.repository.save(self.ziyaretler_df, "visits")
+        if self.event_manager:
+            self.event_manager.emit(Event(EVENT_DATA_UPDATED, {"source": "update_visit"}))
